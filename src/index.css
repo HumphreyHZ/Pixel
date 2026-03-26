@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-shell text-ink font-sans antialiased;
+    background-image:
+      radial-gradient(circle at top left, rgba(255, 255, 255, 0.9), transparent 28%),
+      radial-gradient(circle at top right, rgba(223, 232, 247, 0.8), transparent 28%),
+      linear-gradient(180deg, #fbf8f3 0%, #f4efe7 100%);
+  }
+
+  button {
+    @apply outline-none;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-panel border border-black/5 bg-panel shadow-soft;
+  }
+
+  .pill {
+    @apply rounded-full border border-black/5 bg-white/80 px-4 py-2 text-sm font-semibold text-mist transition hover:bg-white;
+  }
+
+  .pill-active {
+    @apply bg-ink text-white shadow-soft hover:bg-ink;
+  }
+
+  .metric-card {
+    @apply panel p-4;
+  }
+}

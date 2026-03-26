@@ -104,6 +104,7 @@ export default function App() {
     finishFocus,
     toggleTask,
     runAiAction,
+    sendDraftMessage,
     selectPet,
     feedPet,
     redeemStep,
@@ -257,7 +258,27 @@ export default function App() {
 
               <section className="panel p-5">
                 <label className="block text-sm font-semibold text-mist">输入一句目标，让 AI 帮你编排今天</label>
-                <textarea className="mt-3 min-h-28 w-full rounded-[28px] border border-black/5 bg-white/80 px-4 py-4 text-sm outline-none placeholder:text-mist" value={state.draft} onChange={(event) => setDraft(event.target.value)} placeholder="说出你想做的事，我来帮你拆成专注任务" />
+                <textarea
+                  className="mt-3 min-h-28 w-full rounded-[28px] border border-black/5 bg-white/80 px-4 py-4 text-sm outline-none placeholder:text-mist"
+                  value={state.draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      sendDraftMessage();
+                    }
+                  }}
+                  placeholder="说出你想做的事，我来帮你拆成专注任务"
+                />
+                <div className="mt-3 flex justify-end">
+                  <button
+                    className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white disabled:bg-black/15"
+                    disabled={!state.draft.trim()}
+                    onClick={sendDraftMessage}
+                  >
+                    发送
+                  </button>
+                </div>
               </section>
 
               <section className="grid grid-cols-2 gap-3">
@@ -438,6 +459,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

@@ -43,6 +43,26 @@ function createPlanFromDraft(draft: string): string[] {
   return ["25 分钟主线专注", "5 分钟领取奖励", "10 分钟宠物互动与复盘"];
 }
 
+function createReplyFromDraft(draft: string): string {
+  if (draft.includes("专注") || draft.includes("25") || draft.includes("番茄")) {
+    return "可以，先用一轮专注把晶石和经验拿稳。完成后我会提醒你去银行领取步数能量。";
+  }
+
+  if (draft.includes("步数") || draft.includes("能量") || draft.includes("银行")) {
+    return "这条适合接在专注后面。先领取能量，再按 10 比 1 换成晶石，资源会更顺。";
+  }
+
+  if (draft.includes("宠物") || draft.includes("喂食") || draft.includes("升级")) {
+    return "我会把它接成宠物成长路线：先专注加经验，再喂食补心情，最后决定要不要继续探索。";
+  }
+
+  if (draft.includes("探索") || draft.includes("地图")) {
+    return "那我会把探索排在奖励结算后面，这样地图推进会更像完成任务后的展开。";
+  }
+
+  return "收到。我会先把它接到今天的主循环里：拆任务、做一轮专注、领取奖励，再决定继续探索还是喂养宠物。";
+}
+
 function shouldRefreshCompanionContent(savedState: DemoState): boolean {
   const content = [
     savedState.draft,
@@ -323,6 +343,22 @@ export function useDemoState() {
     }));
   }
 
+  function sendDraftMessage(): void {
+    const draft = state.draft.trim();
+    if (!draft) return;
+
+    setState((current) => ({
+      ...current,
+      route: "companion",
+      draft: "",
+      messages: [
+        ...current.messages,
+        { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
+        { id: createId("msg"), role: "pet", type: "text", content: createReplyFromDraft(draft), createdAt: Date.now() },
+      ],
+    }));
+  }
+
   function selectPet(petId: string): void {
     setState((current) => ({
       ...current,
@@ -487,3 +523,5 @@ export function useDemoState() {
     buyItem,
   };
 }
+
+

@@ -25,7 +25,7 @@ export const seedState: DemoState = {
     durationMinutes: 25,
     source: "manual",
   },
-  draft: "今天要做作品集，把首页和 AI 对话页面顺一下。",
+  draft: "我想先完成一轮 25 分钟专注，再去银行领取步数能量，最后带绵羊去探索晨露草坪。",
   pets: [
     { id: "sheep", name: "绵羊", species: "sheep", rarity: "N", level: 12, exp: 36, mood: 78, affection: 44, activeSkin: "默认毛绒", unlocked: true, active: true },
     { id: "beagle", name: "比格犬", species: "dog", rarity: "N", level: 8, exp: 16, mood: 66, affection: 28, activeSkin: "街头围巾", unlocked: true, active: false },
@@ -39,19 +39,20 @@ export const seedState: DemoState = {
     { id: "move", title: "运动", minutes: 10, tone: "amber" },
   ],
   tasks: [
-    { id: "task-1", title: "梳理作品集结构", status: "todo", linkedFocusPresetId: "design" },
-    { id: "task-2", title: "补首页像素宠物视觉", status: "done", linkedFocusPresetId: "design" },
-    { id: "task-3", title: "把 AI 对话动线串起来", status: "todo", linkedFocusPresetId: "work" },
+    { id: "task-1", title: "完成 1 轮 25 分钟专注", status: "todo", linkedFocusPresetId: "design" },
+    { id: "task-2", title: "去银行领取今日步数能量", status: "todo", linkedFocusPresetId: "move" },
+    { id: "task-3", title: "兑换晶石后去晨露草坪探索", status: "todo", linkedFocusPresetId: "work" },
   ],
   notes: [
-    { id: "note-1", title: "让奖励像被宠物夸了一句", body: "结算页不要只显示数字，要让宠物像是在认真回应你的努力。" },
-    { id: "note-2", title: "地图探索应该服务习惯养成", body: "探索不是独立玩法，而是完成专注和步数兑换后的世界展开。" },
+    { id: "note-1", title: "AI 对话先给下一步", body: "每条宠物回复都应该把用户往下一步带，比如专注后提醒去银行领奖，领奖后提醒去探索。" },
+    { id: "note-2", title: "奖励反馈要串成闭环", body: "专注给晶石、步数给能量、兑换后再去探索，让用户在对话里一眼看懂完整循环。" },
   ],
   messages: [
-    { id: "msg-1", role: "pet", type: "text", content: "今天也一起稳稳推进吧。你说一句目标，我来帮你拆成任务。", createdAt: Date.now() - 1000 * 60 * 40 },
-    { id: "msg-2", role: "pet", type: "taskCard", content: "我先拆了 3 个能马上推进的动作。", createdAt: Date.now() - 1000 * 60 * 30, relatedTaskIds: ["task-1", "task-2", "task-3"] },
-    { id: "msg-3", role: "user", type: "text", content: "想让这个 App 更像宠物陪伴，而不是冷冰冰的番茄钟。", createdAt: Date.now() - 1000 * 60 * 20 },
-    { id: "msg-4", role: "pet", type: "imageCard", content: "我把这条想法记成灵感卡了。", createdAt: Date.now() - 1000 * 60 * 10, quoteRef: "完成时，让宠物说一句鼓励你的话。" },
+    { id: "msg-1", role: "pet", type: "text", content: "今天想先做哪一步？我可以帮你排一轮专注、提醒领取步数能量，再带你去探索。", createdAt: Date.now() - 1000 * 60 * 42 },
+    { id: "msg-2", role: "user", type: "text", content: "先做一次 25 分钟专注，然后看看晶石和能量怎么接到探索上。", createdAt: Date.now() - 1000 * 60 * 34 },
+    { id: "msg-3", role: "pet", type: "taskCard", content: "我先把今天的演示旅程拆成 3 步，照着走就能把主循环讲清楚。", createdAt: Date.now() - 1000 * 60 * 26, relatedTaskIds: ["task-1", "task-2", "task-3"] },
+    { id: "msg-4", role: "pet", type: "focusPlan", content: "25 分钟专注推进 / 领取今日步数能量 / 兑换晶石后去晨露草坪探索", createdAt: Date.now() - 1000 * 60 * 18 },
+    { id: "msg-5", role: "pet", type: "imageCard", content: "我把这条目标记成今天的旅程卡了。", createdAt: Date.now() - 1000 * 60 * 10, quoteRef: "专注完成后，优先提醒我去银行领取奖励。" },
   ],
   sessions: [],
   steps: [
@@ -81,4 +82,3 @@ export const seedState: DemoState = {
     logs: ["系统派出了企鹅。你派出绵羊，准备进入演示战斗。"],
   },
 };
-

@@ -3,6 +3,13 @@ import { seedState } from "../data/seed";
 import type { Achievement, DemoState, FocusSession, Pet, RouteKey, TaskItem } from "../types";
 
 const STORAGE_KEY = "pixel-companion-focus-react-demo";
+const LEGACY_COMPANION_KEYWORDS = [
+  "作品集",
+  "首页主视觉",
+  "AI 对话页面顺一下",
+  "冷冰冰的番茄钟",
+  "完成时，让宠物说一句鼓励你的话",
+];
 
 function createId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -13,19 +20,38 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function createTasksFromDraft(draft: string): string[] {
-  if (draft.includes("作品集")) {
-    return ["收集参考案例", "完成首页主视觉", "补 AI 对话演示动线"];
+  if (draft.includes("步数") || draft.includes("能量") || draft.includes("银行")) {
+    return ["完成 1 轮 25 分钟专注", "领取最近一天步数能量", "兑换晶石后去探索晨露草坪"];
   }
 
-  return ["拆清目标范围", "完成一轮核心推进", "写 3 句复盘"];
+  if (draft.includes("宠物") || draft.includes("探索") || draft.includes("图鉴")) {
+    return ["安排一轮专注给宠物加经验", "完成一次喂食或切换陪伴", "触发 1 次探索并记录掉落反馈"];
+  }
+
+  return ["确定今天的专注主题", "完成一轮专注领取晶石", "把奖励带去银行或探索继续展开"];
 }
 
 function createPlanFromDraft(draft: string): string[] {
-  if (draft.includes("作品集")) {
-    return ["25 分钟整理参考", "25 分钟完成主画面", "10 分钟补交互说明"];
+  if (draft.includes("步数") || draft.includes("能量") || draft.includes("银行")) {
+    return ["25 分钟专注推进", "5 分钟领取步数能量", "10 分钟兑换晶石并探索"];
   }
 
-  return ["25 分钟主任务推进", "10 分钟整理输出", "5 分钟轻复盘"];
+  if (draft.includes("宠物") || draft.includes("探索") || draft.includes("图鉴")) {
+    return ["15 分钟整理今日目标", "25 分钟专注提升宠物经验", "10 分钟探索并记录奖励"];
+  }
+
+  return ["25 分钟主线专注", "5 分钟领取奖励", "10 分钟宠物互动与复盘"];
+}
+
+function shouldRefreshCompanionContent(savedState: DemoState): boolean {
+  const content = [
+    savedState.draft,
+    ...savedState.tasks.map((task) => task.title),
+    ...savedState.notes.map((note) => `${note.title} ${note.body}`),
+    ...savedState.messages.map((message) => `${message.content} ${message.quoteRef ?? ""}`),
+  ].join("\n");
+
+  return LEGACY_COMPANION_KEYWORDS.some((keyword) => content.includes(keyword));
 }
 
 function loadState(): DemoState {
@@ -33,7 +59,20 @@ function loadState(): DemoState {
   if (!saved) return seedState;
 
   try {
-    return { ...seedState, ...(JSON.parse(saved) as DemoState) };
+    const parsed = JSON.parse(saved) as DemoState;
+    const mergedState = { ...seedState, ...parsed };
+
+    if (shouldRefreshCompanionContent(mergedState)) {
+      return {
+        ...mergedState,
+        draft: seedState.draft,
+        tasks: seedState.tasks,
+        notes: seedState.notes,
+        messages: seedState.messages,
+      };
+    }
+
+    return mergedState;
   } catch {
     return seedState;
   }
@@ -147,7 +186,7 @@ export function useDemoState() {
           id: createId("msg"),
           role: "pet",
           type: "recap",
-          content: "这次先记成中断也没关系，我们把节奏捡回来就好。",
+          content: "这次先记成中断也没关系，我们把节奏捡回来，再接着补专注奖励。",
           createdAt: Date.now(),
         },
       ],
@@ -172,7 +211,6 @@ export function useDemoState() {
         ...current.sessions,
       ];
 
-      // NOTE: 专注奖励、宠物成长、成就联动在这里一起计算，确保 demo 录屏时反馈是一致的。
       const nextPets = current.pets.map((pet) => {
         if (!pet.active) return pet;
         const threshold = pet.level * 12;
@@ -203,14 +241,14 @@ export function useDemoState() {
             id: createId("msg"),
             role: "pet",
             type: "reward",
-            content: `专注完成，拿到 ${rewardCrystal} 像素晶石和 ${rewardExp} 点经验。`,
+            content: `专注完成，拿到 ${rewardCrystal} 像素晶石和 ${rewardExp} 点经验，当前陪伴宠物也跟着成长了。`,
             createdAt: Date.now(),
           },
           {
             id: createId("msg"),
             role: "pet",
             type: "recap",
-            content: "这一轮推进得很稳。你可以继续开下一轮，或者先去步数银行补一点资源。",
+            content: "这轮已经把奖励拿稳了。下一步建议先去银行领取步数能量，再决定要不要继续探索。",
             createdAt: Date.now(),
           },
         ],
@@ -253,7 +291,7 @@ export function useDemoState() {
         messages: [
           ...current.messages,
           { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-          { id: createId("msg"), role: "pet", type: "taskCard", content: "我把这句话拆成了可以立刻执行的动作。", createdAt: Date.now(), relatedTaskIds: taskIds },
+          { id: createId("msg"), role: "pet", type: "taskCard", content: "我把这句话拆成了今天能直接推进的主循环动作。", createdAt: Date.now(), relatedTaskIds: taskIds },
         ],
       }));
       return;
@@ -276,11 +314,11 @@ export function useDemoState() {
     setState((current) => ({
       ...current,
       route: "companion",
-      notes: [{ id: createId("note"), title: draft.slice(0, 14), body: `${draft}。把它变成一次可见的专注体验。` }, ...current.notes],
+      notes: [{ id: createId("note"), title: draft.slice(0, 14), body: `${draft}。把它整理成一条更清楚的专注旅程。` }, ...current.notes],
       messages: [
         ...current.messages,
         { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-        { id: createId("msg"), role: "pet", type: "imageCard", content: "我把这条想法收进记忆卡了。", createdAt: Date.now(), quoteRef: draft.slice(0, 28) },
+        { id: createId("msg"), role: "pet", type: "imageCard", content: "我把这条目标收进旅程记忆卡了。", createdAt: Date.now(), quoteRef: draft.slice(0, 28) },
       ],
     }));
   }
@@ -315,7 +353,7 @@ export function useDemoState() {
         achievements: patchAchievements(current.sessions, true, current.pets),
         messages: [
           ...current.messages,
-          { id: createId("msg"), role: "pet", type: "systemEvent", content: `步数到账：${target.energyEarned} 能量已经放进你的银行。`, createdAt: Date.now() },
+          { id: createId("msg"), role: "pet", type: "systemEvent", content: `步数到账：${target.energyEarned} 能量已经放进你的银行，现在可以考虑兑换成晶石了。`, createdAt: Date.now() },
         ],
       };
     });
@@ -332,6 +370,16 @@ export function useDemoState() {
           energy: current.wallet.energy - crystals * 10,
           crystal: current.wallet.crystal + crystals,
         },
+        messages: [
+          ...current.messages,
+          {
+            id: createId("msg"),
+            role: "pet",
+            type: "systemEvent",
+            content: `已兑换 ${crystals} 枚像素晶石。现在资源更充足了，可以去喂食、探索，或者继续开下一轮专注。`,
+            createdAt: Date.now(),
+          },
+        ],
       };
     });
   }
@@ -343,7 +391,7 @@ export function useDemoState() {
       mapNodes: current.mapNodes.map((node) => (node.id === nodeId ? { ...node, explored: node.explored + 1 } : node)),
       messages: [
         ...current.messages,
-        { id: createId("msg"), role: "pet", type: "systemEvent", content: "探索成功，带回 12 枚像素晶石，还顺手解锁了一段世界观。", createdAt: Date.now() },
+        { id: createId("msg"), role: "pet", type: "systemEvent", content: "探索成功，带回 12 枚像素晶石，还顺手点亮了一段新的地图记忆。", createdAt: Date.now() },
       ],
     }));
   }

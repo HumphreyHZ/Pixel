@@ -141,8 +141,8 @@ export default function App() {
               <section className="panel overflow-hidden bg-gradient-to-br from-sky/70 via-white to-peach/50 p-5">
                 <p className="text-sm font-medium text-mist">专注不是打卡，而是和宠物一起把一天慢慢完成。</p>
                 <div className="mt-5 flex items-center gap-4">
-                  <div className="shrink-0 rounded-[30px] bg-white/70 p-3 shadow-soft">
-                    <PixelPet pet={activePet} size="lg" />
+                  <div className="shrink-0">
+                    <PixelPet pet={activePet} size="lg" tone="home" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <h2 className="text-3xl font-black tracking-tight">{activePet.name}</h2>
@@ -193,8 +193,8 @@ export default function App() {
           {state.route === "focus" && (
             <>
               <section className="panel bg-gradient-to-b from-sky/50 via-white to-white p-5 text-center">
-                <div className="mx-auto w-fit rounded-[32px] bg-black/5 p-3 shadow-soft">
-                  <PixelPet pet={activePet} size="lg" />
+                <div className="mx-auto w-fit">
+                  <PixelPet pet={activePet} size="lg" tone="focus" />
                 </div>
                 <p className="mt-5 text-sm text-mist">当前标签 · {selectedPreset.title} · {state.focus.source === "ai" ? "AI 编排" : "手动选择"}</p>
                 <div className="mt-3 text-[4.5rem] font-black leading-none tracking-tight">{formatTimer(timerSeconds)}</div>
@@ -284,7 +284,7 @@ export default function App() {
             <>
               <section className="panel p-5">
                 <div className="flex items-center gap-4">
-                  <div className="rounded-[30px] bg-black/5 p-3 shadow-soft">
+                  <div className="shrink-0">
                     <PixelPet pet={activePet} size="lg" />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -305,7 +305,7 @@ export default function App() {
               <section className="grid grid-cols-2 gap-3">
                 {state.pets.map((pet) => (
                   <div key={pet.id} className="panel p-4">
-                    <div className="mx-auto w-fit rounded-[24px] bg-black/5 p-3">
+                    <div className="mx-auto w-fit">
                       <PixelPet pet={pet} size="md" />
                     </div>
                     <p className="mt-4 text-lg font-black tracking-tight">{pet.name}</p>
@@ -438,6 +438,9 @@ export default function App() {
     </div>
   );
 }
+
+
+
 
 
 

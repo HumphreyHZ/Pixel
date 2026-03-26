@@ -513,6 +513,7 @@ export function useDemoState() {
     finishFocus,
     toggleTask,
     runAiAction,
+    sendDraftMessage,
     selectPet,
     feedPet,
     redeemStep,

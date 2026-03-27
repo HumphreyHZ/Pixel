@@ -252,7 +252,7 @@ export default function App() {
               <section className="grid grid-cols-2 gap-3">
                 <button className="col-span-2 rounded-full bg-ink px-5 py-4 text-sm font-semibold text-white" onClick={startFocus}>开始这一轮专注</button>
                 <button className="rounded-full bg-white px-5 py-4 text-sm font-semibold text-ink shadow-soft" onClick={stopFocus}>提前结束</button>
-                <button className="rounded-full bg-amber/75 px-5 py-4 text-sm font-semibold text-ink" onClick={finishFocus}>直接演示完成反馈</button>
+                <button className="rounded-full bg-amber/75 px-5 py-4 text-sm font-semibold text-ink" onClick={finishFocus}>完成本轮</button>
               </section>
             </>
           )}
@@ -542,3 +542,4 @@ export default function App() {
     </div>
   );
 }
+

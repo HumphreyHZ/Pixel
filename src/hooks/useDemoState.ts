@@ -454,7 +454,8 @@ export function useDemoState() {
       }
 
       const enemyHp = action === "attack" ? clamp(current.battle.enemyHp - 28, 0, current.battle.enemyMaxHp) : current.battle.enemyHp;
-      const playerHpBase = action === "heal" ? clamp(current.battle.playerHp + 18, 0, current.battle.playerMaxHp) : current.battle.playerHp;
+      const healAmount = action === "heal" ? Math.max(0, Math.min(18, current.battle.playerMaxHp - current.battle.playerHp)) : 0;
+      const playerHpBase = action === "heal" ? current.battle.playerHp + healAmount : current.battle.playerHp;
 
       if (enemyHp <= 0) {
         return {

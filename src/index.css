@@ -1,4 +1,4 @@
-@tailwind base;
+﻿@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
@@ -24,11 +24,11 @@
 
 @layer components {
   .panel {
-    @apply rounded-panel border border-black/5 bg-panel shadow-soft;
+    @apply rounded-panel border border-black/[0.04] bg-white shadow-[0_14px_36px_rgba(28,23,18,0.08)];
   }
 
   .pill {
-    @apply rounded-full border border-black/5 bg-white/80 px-4 py-2 text-sm font-semibold text-mist transition hover:bg-white;
+    @apply rounded-full border border-black/[0.05] bg-white px-4 py-2 text-sm font-semibold text-mist transition hover:bg-white;
   }
 
   .pill-active {
@@ -39,3 +39,4 @@
     @apply panel p-4;
   }
 }
+

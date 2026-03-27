@@ -10,6 +10,7 @@
   | "shop";
 
 export type FocusMode = "pomodoro" | "countup";
+export type FocusSource = "manual" | "ai" | "demo";
 export type MessageType = "text" | "taskCard" | "focusPlan" | "reward" | "recap" | "imageCard" | "systemEvent";
 export type TaskStatus = "todo" | "done";
 export type Rarity = "N" | "R" | "SR";
@@ -17,7 +18,6 @@ export type Rarity = "N" | "R" | "SR";
 export interface Wallet {
   crystal: number;
   energy: number;
-  stamina: number;
 }
 
 export interface Pet {
@@ -47,7 +47,7 @@ export interface FocusState {
   running: boolean;
   startedAt: number | null;
   durationMinutes: number;
-  source: "manual" | "ai";
+  source: FocusSource;
 }
 
 export interface FocusSession {
@@ -57,7 +57,7 @@ export interface FocusSession {
   status: "completed" | "interrupted";
   crystalReward: number;
   expReward: number;
-  source: "manual" | "ai";
+  source: FocusSource;
   endedAt: number;
 }
 
@@ -132,3 +132,6 @@ export interface DemoState {
   achievements: Achievement[];
   battle: BattleState;
 }
+
+
+

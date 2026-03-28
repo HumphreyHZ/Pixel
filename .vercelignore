@@ -1,0 +1,7 @@
+.codex
+.git
+dist
+node_modules
+vite-dev-check.err.log
+vite-dev-check.out.log
+*.tsbuildinfo

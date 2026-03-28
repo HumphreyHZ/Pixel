@@ -133,3 +133,13 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 
 新增规则 6：
 当用户指出透明化后的素材仍存在离散黑点、碎片像素或残留噪点时，必须继续清理这些非主体连通区域，优先保留主体最大连通块，并在处理前保留当前版本备份。
+
+八、Vercel 部署说明
+- 本仓库已补齐 `vercel.json`，默认使用 `npm ci` 安装依赖、`npm run build` 构建，并将 `dist` 作为发布目录。
+- 一键部署步骤：
+  1. 将仓库推送到 GitHub
+  2. 在 Vercel 中导入该仓库
+  3. 保持默认配置直接部署即可
+- 本地检查命令：
+  - `npm run build`
+  - `npm run preview -- --host 127.0.0.1 --port 4173`

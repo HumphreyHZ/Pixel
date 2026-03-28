@@ -23,6 +23,24 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizePets(pets: Pet[], selectedPetId?: string): Pet[] {
+  const fallbackPetId = pets.find((pet) => pet.active)?.id ?? pets[0]?.id;
+  const resolvedPetId = selectedPetId ?? fallbackPetId;
+  return pets.map((pet) => ({ ...pet, active: pet.id === resolvedPetId }));
+}
+
+function getActivePetFromState(currentState: Pick<DemoState, "pets" | "selectedPetId">): Pet {
+  return currentState.pets.find((pet) => pet.id === currentState.selectedPetId) ?? currentState.pets[0];
+}
+
+function createBattleIntroLog(petName: string): string {
+  return `系统派出了企鹅。你派出了${petName}，准备进入演示战斗。`;
+}
+
+function createBattleOpeningLog(petName: string): string {
+  return `系统派出了企鹅。你派出了${petName}，准备先手进攻。`;
+}
+
 function getFocusElapsedSeconds(focus: DemoState["focus"], currentTime = Date.now()): number {
   if (!focus.running || !focus.startedAt) return 0;
   return Math.max(0, Math.floor((currentTime - focus.startedAt) / 1000));
@@ -94,12 +112,27 @@ function loadState(): DemoState {
 
   try {
     const parsed = JSON.parse(saved) as DemoState;
+    const nextPets = normalizePets(parsed.pets ?? seedState.pets, parsed.selectedPetId ?? seedState.selectedPetId);
+    const activePet = getActivePetFromState({
+      pets: nextPets,
+      selectedPetId: nextPets.find((pet) => pet.active)?.id ?? seedState.selectedPetId,
+    });
     const mergedState = {
       ...seedState,
       ...parsed,
+      pets: nextPets,
+      selectedPetId: activePet.id,
       wallet: {
         crystal: parsed.wallet?.crystal ?? seedState.wallet.crystal,
         energy: seedState.wallet.energy,
+      },
+      battle: {
+        ...seedState.battle,
+        ...parsed.battle,
+        active: false,
+        enemyHp: seedState.battle.enemyMaxHp,
+        playerHp: seedState.battle.playerMaxHp,
+        logs: [createBattleIntroLog(activePet.name)],
       },
     };
 
@@ -137,7 +170,7 @@ export function useDemoState() {
     return () => window.clearInterval(timerId);
   }, [state.focus.running]);
 
-  const activePet = useMemo<Pet>(() => state.pets.find((pet) => pet.active) ?? state.pets[0], [state.pets]);
+  const activePet = useMemo<Pet>(() => getActivePetFromState(state), [state]);
   const selectedPreset = useMemo(() => getPresetMeta(state, state.focus.selectedPresetId), [state]);
   const completedMinutes = useMemo(
     () => state.sessions.filter((item) => item.status === "completed").reduce((sum, item) => sum + item.duration, 0),
@@ -181,7 +214,7 @@ export function useDemoState() {
     ];
 
     const nextPets = current.pets.map((pet) => {
-      if (!pet.active) return pet;
+      if (pet.id !== current.selectedPetId) return pet;
       const threshold = pet.level * 12;
       const nextExpRaw = pet.exp + rewardExp;
       const leveled = nextExpRaw >= threshold;
@@ -422,10 +455,23 @@ export function useDemoState() {
   }
 
   function selectPet(petId: string): void {
-    setState((current) => ({
-      ...current,
-      pets: current.pets.map((pet) => ({ ...pet, active: pet.id === petId })),
-    }));
+    setState((current) => {
+      const nextPets = normalizePets(current.pets, petId);
+      const nextActivePet = getActivePetFromState({ pets: nextPets, selectedPetId: petId });
+
+      return {
+        ...current,
+        selectedPetId: petId,
+        pets: nextPets,
+        battle: {
+          ...current.battle,
+          active: false,
+          enemyHp: current.battle.enemyMaxHp,
+          playerHp: current.battle.playerMaxHp,
+          logs: [createBattleIntroLog(nextActivePet.name)],
+        },
+      };
+    });
   }
 
   function feedPet(): void {
@@ -435,7 +481,9 @@ export function useDemoState() {
         ...current,
         wallet: { ...current.wallet, crystal: current.wallet.crystal - 18 },
         pets: current.pets.map((pet) =>
-          pet.active ? { ...pet, mood: clamp(pet.mood + 12, 0, 100), affection: clamp(pet.affection + 8, 0, 100) } : pet,
+          pet.id === current.selectedPetId
+            ? { ...pet, mood: clamp(pet.mood + 12, 0, 100), affection: clamp(pet.affection + 8, 0, 100) }
+            : pet,
         ),
       };
     });
@@ -503,6 +551,7 @@ export function useDemoState() {
   function startBattle(): void {
     setState((current) => {
       if (current.wallet.energy < 10) return current;
+      const currentActivePet = getActivePetFromState(current);
       return {
         ...current,
         wallet: { ...current.wallet, energy: clamp(current.wallet.energy - 10, 0, seedState.wallet.energy) },
@@ -511,7 +560,7 @@ export function useDemoState() {
           active: true,
           enemyHp: current.battle.enemyMaxHp,
           playerHp: current.battle.playerMaxHp,
-          logs: ["系统派出了企鹅。你准备先手进攻。"],
+          logs: [createBattleOpeningLog(currentActivePet.name)],
         },
       };
     });
@@ -520,8 +569,16 @@ export function useDemoState() {
   function battleAction(action: "attack" | "heal" | "guard" | "escape"): void {
     setState((current) => {
       if (!current.battle.active) return current;
+      const currentActivePet = getActivePetFromState(current);
       if (action === "escape") {
-        return { ...current, battle: { ...current.battle, active: false, logs: ["你撤退了，把能量留给更重要的任务。"] } };
+        return {
+          ...current,
+          battle: {
+            ...current.battle,
+            active: false,
+            logs: [`${currentActivePet.name} 先撤退了，把能量留给更重要的任务。`],
+          },
+        };
       }
 
       const enemyHp = action === "attack" ? clamp(current.battle.enemyHp - 28, 0, current.battle.enemyMaxHp) : current.battle.enemyHp;
@@ -532,7 +589,12 @@ export function useDemoState() {
         return {
           ...current,
           wallet: { ...current.wallet, crystal: current.wallet.crystal + 20 },
-          battle: { ...current.battle, active: false, enemyHp, logs: ["你赢下了系统对战，额外拿到 20 晶石。"] },
+          battle: {
+            ...current.battle,
+            active: false,
+            enemyHp,
+            logs: [`${currentActivePet.name} 赢下了这场试炼，额外拿到 20 晶石。`],
+          },
         };
       }
 
@@ -543,7 +605,11 @@ export function useDemoState() {
           enemyHp,
           playerHp: clamp(playerHpBase - 16, 0, current.battle.playerMaxHp),
           logs: [
-            action === "attack" ? "你发起攻击，对方掉了 28 HP。" : action === "heal" ? "你回复了 18 HP。" : "你选择防御，压住了节奏。",
+            action === "attack"
+              ? `${currentActivePet.name} 发起攻击，对方掉了 28 HP。`
+              : action === "heal"
+                ? `${currentActivePet.name} 回复了 18 HP。`
+                : `${currentActivePet.name} 顶住防御，先稳住节奏。`,
             "系统反击，造成 16 点伤害。",
           ],
         },
@@ -558,7 +624,7 @@ export function useDemoState() {
       if (current.wallet.crystal < prices[itemId]) return current;
 
       const nextPets = current.pets.map((pet) => {
-        if (!pet.active) return pet;
+        if (pet.id !== current.selectedPetId) return pet;
         if (itemId === "scarf") return { ...pet, activeSkin: "荧光围巾" };
         if (itemId === "snack") {
           return {

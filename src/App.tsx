@@ -220,6 +220,17 @@ export default function App() {
   const completedFocusCount = completedSessions.length;
   const redeemedStepsCount = state.steps.filter((item) => item.redeemed).length;
   const chapterMeta = routeMeta[state.route];
+  const battleNarration = useMemo(() => {
+    if (state.battle.active) {
+      return state.battle.logs;
+    }
+
+    if (state.battle.logs.some((log) => log.includes("准备进入演示战斗") || log.includes("准备先手进攻"))) {
+      return [`系统派出了${state.battle.enemyName}。你派出了${activePet.name}，准备进入演示战斗。`];
+    }
+
+    return state.battle.logs;
+  }, [activePet.name, state.battle.active, state.battle.enemyName, state.battle.logs]);
 
   const homeStory = useMemo(() => {
     if (state.focus.running) {
@@ -715,7 +726,7 @@ export default function App() {
                 <SectionTitle eyebrow="图鉴" title="已解锁的陪伴阵列" caption="切换陪伴时，也是在切换整个界面的情绪和叙事角色。" />
                 <div className="grid grid-cols-2 gap-3">
                   {state.pets.map((pet) => (
-                    <article key={pet.id} className={`stamp-card ${pet.active ? "stamp-card-active" : "stamp-card-muted"}`}>
+                    <article key={pet.id} className={`stamp-card ${pet.id === state.selectedPetId ? "stamp-card-active" : "stamp-card-muted"}`}>
                       <div className="mx-auto w-fit">
                         <PixelPet pet={pet} size="sm" />
                       </div>
@@ -723,10 +734,10 @@ export default function App() {
                       <p className="mt-1 text-sm text-mist">Lv.{pet.level} · {pet.rarity}</p>
                       <button
                         type="button"
-                        className={`mt-4 ${pet.active ? "story-button-soft" : "story-button-secondary"}`}
+                        className={`mt-4 ${pet.id === state.selectedPetId ? "story-button-soft" : "story-button-secondary"}`}
                         onClick={() => selectPet(pet.id)}
                       >
-                        {pet.active ? "当前陪伴" : "切换陪伴"}
+                        {pet.id === state.selectedPetId ? "当前陪伴" : "切换陪伴"}
                       </button>
                     </article>
                   ))}
@@ -852,8 +863,10 @@ export default function App() {
                 <SectionTitle eyebrow="试炼场" title="打一场轻量遭遇，展示资源门槛和状态变化" caption="这页更像旅程插曲，而不是独立 mini game，所以视觉会继续服从整套手账壳子。" trailing={<span className="story-chip">消耗 10 能量</span>} />
                 <div className="grid grid-cols-2 gap-3">
                   <div className="note-strip !p-4">
-                    <div className="mx-auto w-fit">
-                      <PixelPet pet={activePet} size="sm" tone="home" />
+                    <div className="grid h-24 place-items-center">
+                      <div className="mx-auto w-fit">
+                        <PixelPet pet={activePet} size="sm" tone="home" />
+                      </div>
                     </div>
                     <p className="mt-3 text-center text-lg font-black tracking-tight text-ink">{activePet.name}</p>
                     <p className="mt-1 text-center text-sm text-mist">HP {state.battle.playerHp}/{state.battle.playerMaxHp}</p>
@@ -874,7 +887,7 @@ export default function App() {
                 </div>
 
                 <div className="note-strip mt-5 text-sm leading-6 text-mist">
-                  {state.battle.logs.map((log, index) => (
+                  {battleNarration.map((log, index) => (
                     <p key={`${log}-${index}`}>{log}</p>
                   ))}
                 </div>

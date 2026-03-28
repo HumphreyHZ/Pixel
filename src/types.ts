@@ -119,6 +119,7 @@ export interface BattleState {
 export interface DemoState {
   route: RouteKey;
   wallet: Wallet;
+  selectedPetId: string;
   focus: FocusState;
   draft: string;
   pets: Pet[];

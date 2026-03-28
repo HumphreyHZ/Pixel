@@ -17,6 +17,7 @@ export const mainRoutes: DemoState["route"][] = ["home", "companion", "focus", "
 export const seedState: DemoState = {
   route: "home",
   wallet: { crystal: 96, energy: 999 },
+  selectedPetId: "sheep",
   focus: {
     mode: "pomodoro",
     selectedPresetId: "design",

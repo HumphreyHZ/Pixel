@@ -11,9 +11,10 @@
 
 export type FocusMode = "pomodoro" | "countup";
 export type FocusSource = "manual" | "ai" | "demo";
-export type MessageType = "text" | "taskCard" | "focusPlan" | "reward" | "recap" | "imageCard" | "systemEvent";
+export type MessageType = "text" | "taskCard" | "focusPlan" | "reward" | "recap" | "imageCard" | "systemEvent" | "structuredPlan";
 export type TaskStatus = "todo" | "done";
 export type Rarity = "N" | "R" | "SR";
+export type AICardType = "journeyPlan" | "focusRecap" | "resourceAdvice" | "contextHint";
 
 export interface Wallet {
   crystal: number;
@@ -82,6 +83,16 @@ export interface CompanionMessage {
   createdAt: number;
   relatedTaskIds?: string[];
   quoteRef?: string;
+  structuredPlan?: StructuredPlan;
+}
+
+export interface StructuredPlan {
+  goalSummary: string;
+  steps: string[];
+  recommendedDuration: string;
+  nextRoute: RouteKey;
+  nextAction: string;
+  why: string;
 }
 
 export interface StepLedger {
@@ -106,6 +117,18 @@ export interface Achievement {
   unlocked: boolean;
 }
 
+export interface AICard {
+  id: string;
+  type: AICardType;
+  title: string;
+  description: string;
+  ctaLabel: string;
+  ctaRoute?: RouteKey;
+  secondaryLabel?: string;
+  secondaryRoute?: RouteKey;
+  steps?: string[];
+}
+
 export interface BattleState {
   active: boolean;
   enemyName: string;
@@ -127,6 +150,7 @@ export interface DemoState {
   tasks: TaskItem[];
   notes: InspirationNote[];
   messages: CompanionMessage[];
+  aiCards: AICard[];
   sessions: FocusSession[];
   steps: StepLedger[];
   mapNodes: MapNode[];

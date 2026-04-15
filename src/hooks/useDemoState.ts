@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { seedState } from "../data/seed";
-import type { Achievement, DemoState, FocusSession, Pet, RouteKey, TaskItem } from "../types";
+import type { AICard, Achievement, DemoState, FocusSession, Pet, RouteKey, StructuredPlan, TaskItem } from "../types";
 
 const STORAGE_KEY = "pixel-companion-focus-react-demo";
 const LEGACY_COMPANION_KEYWORDS = [
@@ -39,6 +39,197 @@ function createBattleIntroLog(petName: string): string {
 
 function createBattleOpeningLog(petName: string): string {
   return `系统派出了企鹅。你派出了${petName}，准备先手进攻。`;
+}
+
+function upsertAiCard(cards: AICard[], nextCard: AICard): AICard[] {
+  return [nextCard, ...cards.filter((card) => card.type !== nextCard.type)];
+}
+
+function createStructuredPlanFromDraft(draft: string, currentState: DemoState): StructuredPlan {
+  const claimableEnergy = currentState.steps.filter((item) => !item.redeemed).reduce((sum, item) => sum + item.energyEarned, 0);
+  const normalizedDraft = draft.trim() || "我今天有点乱，先帮我决定从哪开始";
+
+  if (currentState.focus.running) {
+    return {
+      goalSummary: "把当前这轮专注完整走完",
+      steps: ["先把当前专注完成", "去奖励页领取步数能量", "再决定继续探索还是陪伴复盘"],
+      recommendedDuration: `${currentState.focus.durationMinutes} 分钟当前节奏`,
+      nextRoute: "focus",
+      nextAction: "先把这轮走完",
+      why: "先把正在进行的进度落袋，再接上后续奖励，会更像一条完整旅程。",
+    };
+  }
+
+  if (claimableEnergy > 0 && (normalizedDraft.includes("奖励") || normalizedDraft.includes("能量") || normalizedDraft.includes("兑换"))) {
+    return {
+      goalSummary: "把奖励闭环讲清楚",
+      steps: ["先去奖励页收下步数能量", "按建议兑换一部分晶石", "再带着资源去探索或对战"],
+      recommendedDuration: "15 分钟阅读整理",
+      nextRoute: "bank",
+      nextAction: "先收下今天奖励",
+      why: "你已经有待领资源了，先让奖励到账，再解释资源流动会更顺。",
+    };
+  }
+
+  if (normalizedDraft.includes("休息") || normalizedDraft.includes("累") || normalizedDraft.includes("热身")) {
+    return {
+      goalSummary: "先把状态轻一点地拉起来",
+      steps: ["先做一轮 10 分钟快速热身", "去奖励页看一次能量变化", "如果状态起来了，再切 25 分钟深度专注"],
+      recommendedDuration: "10 分钟快速热身",
+      nextRoute: "focus",
+      nextAction: "先轻量开始",
+      why: "先用短时长把节奏拉起来，比一开始就逼自己深度专注更容易进入状态。",
+    };
+  }
+
+  if (normalizedDraft.includes("探索") || normalizedDraft.includes("宠物") || normalizedDraft.includes("图鉴")) {
+    return {
+      goalSummary: "让陪伴和探索一起接进主线",
+      steps: ["先做一轮 25 分钟专注", "再去奖励页领取步数能量", "最后带着陪伴去探索或切换图鉴角色"],
+      recommendedDuration: "25 分钟深度专注",
+      nextRoute: "focus",
+      nextAction: "先把第一轮拿下",
+      why: "先让专注和奖励出现，再让宠物与探索接进来，闭环会更可信。",
+    };
+  }
+
+  return {
+    goalSummary: "把今天的主线讲顺",
+    steps: ["先完成一轮 25 分钟专注", "去奖励页领取步数能量", "再决定继续探索还是陪伴复盘"],
+    recommendedDuration: "25 分钟深度专注",
+    nextRoute: claimableEnergy > 0 ? "bank" : "focus",
+    nextAction: claimableEnergy > 0 ? "先收下今天奖励" : "先把第一轮拿下",
+    why: claimableEnergy > 0
+      ? "你已经有待领取的资源了，先让奖励到账，再继续往下走会更完整。"
+      : "先让专注和奖励出现，再让资源继续流动起来，会更顺。",
+  };
+}
+
+function createJourneyPlanCard(plan: StructuredPlan): AICard {
+  return {
+    id: createId("ai"),
+    type: "journeyPlan",
+    title: "今天建议这样走",
+    description: plan.goalSummary,
+    ctaLabel: "生成今日主线",
+    ctaRoute: "home",
+    secondaryLabel: "直接开始第一轮",
+    secondaryRoute: plan.nextRoute,
+    steps: plan.steps,
+  };
+}
+
+function createFocusRecapCard(source: DemoState["focus"]["source"]): AICard {
+  return {
+    id: createId("ai"),
+    type: "focusRecap",
+    title: "这一轮之后，下一步更适合",
+    description:
+      source === "demo"
+        ? "这次按演示结算处理。建议下一步直接去奖励页，把后续闭环走完整。"
+        : "这轮已经稳了。建议先去奖励页把步数能量收回来，再决定要不要继续下一轮。",
+    ctaLabel: "去领取能量",
+    ctaRoute: "bank",
+    secondaryLabel: "再开一轮",
+    secondaryRoute: "focus",
+  };
+}
+
+function createResourceAdviceCard(currentState: DemoState): AICard {
+  const claimableEnergy = currentState.steps.filter((item) => !item.redeemed).reduce((sum, item) => sum + item.energyEarned, 0);
+
+  if (claimableEnergy > 0) {
+    return {
+      id: createId("ai"),
+      type: "resourceAdvice",
+      title: "现在这些能量更适合怎么用",
+      description: "先把今天的步数小票收进来，再决定兑换还是继续冒险。",
+      ctaLabel: "先收下今天奖励",
+      ctaRoute: "bank",
+      secondaryLabel: "去探索",
+      secondaryRoute: "explore",
+    };
+  }
+
+  if (currentState.wallet.energy >= 40) {
+    return {
+      id: createId("ai"),
+      type: "resourceAdvice",
+      title: "现在这些能量更适合怎么用",
+      description: "你现在的能量足够先探索一次，再考虑兑换晶石。",
+      ctaLabel: "去探索",
+      ctaRoute: "explore",
+      secondaryLabel: "按建议兑换成晶石",
+      secondaryRoute: "bank",
+    };
+  }
+
+  return {
+    id: createId("ai"),
+    type: "resourceAdvice",
+    title: "现在这些能量更适合怎么用",
+    description: "这点能量更适合先攒着，不建议立刻兑换。",
+    ctaLabel: "继续累积能量",
+    ctaRoute: "focus",
+    secondaryLabel: "回到主线",
+    secondaryRoute: "home",
+  };
+}
+
+function createContextHintCard(currentState: DemoState): AICard {
+  const activePet = getActivePetFromState(currentState);
+  return {
+    id: createId("ai"),
+    type: "contextHint",
+    title: "这一步更适合怎么走",
+    description: `${activePet.name} 会参与开场说明和战斗反馈。建议打一轮攻击，再看是否继续。`,
+    ctaLabel: "开始一场试炼",
+    ctaRoute: "battle",
+    secondaryLabel: "先看资源建议",
+    secondaryRoute: "bank",
+  };
+}
+
+function ensureAiCards(currentState: DemoState): DemoState {
+  const nextPlan = createStructuredPlanFromDraft(currentState.draft, currentState);
+  let nextCards = currentState.aiCards ?? [];
+
+  if (!nextCards.some((card) => card.type === "journeyPlan")) {
+    nextCards = upsertAiCard(nextCards, createJourneyPlanCard(nextPlan));
+  }
+
+  nextCards = upsertAiCard(nextCards, createResourceAdviceCard(currentState));
+  nextCards = upsertAiCard(nextCards, createContextHintCard(currentState));
+
+  return {
+    ...currentState,
+    aiCards: nextCards,
+  };
+}
+
+function createPetAdvice(pet: Pet): string {
+  if (pet.id === "sheep") {
+    return "绵羊更适合做温和的起步陪伴。今天如果还没完全进入状态，就先让它陪你把第一轮走起来。";
+  }
+
+  if (pet.id === "beagle") {
+    return "比格犬更适合做推进型搭档。你现在最适合快一点把主线跑完，再回来整理细节。";
+  }
+
+  if (pet.id === "night-cat") {
+    return "夜猫子更适合做复盘和整理型陪伴。等你拿到奖励后，让它帮你把节奏收紧会很顺。";
+  }
+
+  return "休憩兔更适合做缓冲和安抚型陪伴。状态紧的时候，先轻一点地推进会更自然。";
+}
+
+function createStructuredPlanMessage(draft: string, currentState: DemoState) {
+  const structuredPlan = createStructuredPlanFromDraft(draft, currentState);
+  return {
+    content: "我先把这句话整理成一条可以直接走的旅程。",
+    structuredPlan,
+    card: createJourneyPlanCard(structuredPlan),
+  };
 }
 
 function getFocusElapsedSeconds(focus: DemoState["focus"], currentTime = Date.now()): number {
@@ -134,19 +325,20 @@ function loadState(): DemoState {
         playerHp: seedState.battle.playerMaxHp,
         logs: [createBattleIntroLog(activePet.name)],
       },
+      aiCards: parsed.aiCards ?? seedState.aiCards,
     };
 
     if (shouldRefreshCompanionContent(mergedState)) {
-      return {
+      return ensureAiCards({
         ...mergedState,
         draft: seedState.draft,
         tasks: seedState.tasks,
         notes: seedState.notes,
         messages: seedState.messages,
-      };
+      });
     }
 
-    return mergedState;
+    return ensureAiCards(mergedState);
   } catch {
     return seedState;
   }
@@ -176,6 +368,18 @@ export function useDemoState() {
     () => state.sessions.filter((item) => item.status === "completed").reduce((sum, item) => sum + item.duration, 0),
     [state.sessions],
   );
+
+  function finalizeState(nextState: DemoState, cardsToUpsert: AICard[] = []): DemoState {
+    let mergedCards = nextState.aiCards;
+    cardsToUpsert.forEach((card) => {
+      mergedCards = upsertAiCard(mergedCards, card);
+    });
+
+    return ensureAiCards({
+      ...nextState,
+      aiCards: mergedCards,
+    });
+  }
 
   function patchAchievements(nextSessions: FocusSession[], stepRedeemed: boolean, nextPets: Pet[]): Achievement[] {
     return state.achievements.map((achievement) => {
@@ -226,7 +430,7 @@ export function useDemoState() {
       };
     });
 
-    return {
+    return finalizeState({
       ...current,
       wallet: {
         ...current.wallet,
@@ -256,7 +460,7 @@ export function useDemoState() {
           createdAt: Date.now(),
         },
       ],
-    };
+    }, [createFocusRecapCard(source)]);
   }
 
   function setRoute(route: RouteKey): void {
@@ -265,6 +469,18 @@ export function useDemoState() {
 
   function setDraft(value: string): void {
     setState((current) => ({ ...current, draft: value }));
+  }
+
+  function generateJourneyPlan(): void {
+    setState((current) => {
+      const nextDraft = current.draft.trim() || "我今天有点乱，先帮我决定从哪开始";
+      const journeyPlan = createStructuredPlanMessage(nextDraft, current);
+
+      return finalizeState({
+        ...current,
+        draft: nextDraft,
+      }, [journeyPlan.card]);
+    });
   }
 
   function setFocusMode(mode: DemoState["focus"]["mode"]): void {
@@ -317,7 +533,7 @@ export function useDemoState() {
 
       const activePreset = getPresetMeta(current, current.focus.selectedPresetId);
       const interruptedDuration = Math.max(1, Math.round(getFocusElapsedSeconds(current.focus) / 60));
-      return {
+      return finalizeState({
         ...current,
         focus: { ...current.focus, running: false, startedAt: null },
         sessions: [
@@ -343,7 +559,7 @@ export function useDemoState() {
             createdAt: Date.now(),
           },
         ],
-      };
+      });
     });
   }
 
@@ -398,35 +614,53 @@ export function useDemoState() {
         taskIds.push(id);
         return { id, title, status: "todo", linkedFocusPresetId: selectedPreset.id };
       });
+      const journeyPlan = createStructuredPlanMessage(draft, state);
 
-      setState((current) => ({
+      setState((current) => finalizeState({
         ...current,
         route: "companion",
         tasks: [...nextTasks, ...current.tasks],
         messages: [
           ...current.messages,
           { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
+          {
+            id: createId("msg"),
+            role: "pet",
+            type: "structuredPlan",
+            content: "我把这句话整理成一张可以直接执行的旅程卡。",
+            createdAt: Date.now(),
+            structuredPlan: journeyPlan.structuredPlan,
+          },
           { id: createId("msg"), role: "pet", type: "taskCard", content: "我把这句话拆成了今天最顺手的 3 个动作。", createdAt: Date.now(), relatedTaskIds: taskIds },
         ],
-      }));
+      }, [journeyPlan.card]));
       return;
     }
 
     if (action === "plan") {
-      setState((current) => ({
+      const journeyPlan = createStructuredPlanMessage(draft, state);
+
+      setState((current) => finalizeState({
         ...current,
-        route: "focus",
+        route: "companion",
         focus: { ...current.focus, source: "ai" },
         messages: [
           ...current.messages,
           { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-          { id: createId("msg"), role: "pet", type: "focusPlan", content: createPlanFromDraft(draft).join(" / "), createdAt: Date.now() },
+          {
+            id: createId("msg"),
+            role: "pet",
+            type: "structuredPlan",
+            content: "我先把顺序排好，你照着走就能把主线讲清楚。",
+            createdAt: Date.now(),
+            structuredPlan: journeyPlan.structuredPlan,
+          },
         ],
-      }));
+      }, [journeyPlan.card]));
       return;
     }
 
-    setState((current) => ({
+    setState((current) => finalizeState({
       ...current,
       route: "companion",
       notes: [{ id: createId("note"), title: draft.slice(0, 14), body: `${draft}。把它整理成一条更清楚的专注旅程。` }, ...current.notes],
@@ -441,17 +675,45 @@ export function useDemoState() {
   function sendDraftMessage(): void {
     const draft = state.draft.trim();
     if (!draft) return;
+    const journeyPlan = createStructuredPlanMessage(draft, state);
 
-    setState((current) => ({
+    setState((current) => finalizeState({
       ...current,
       route: "companion",
       draft: "",
       messages: [
         ...current.messages,
         { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-        { id: createId("msg"), role: "pet", type: "text", content: createReplyFromDraft(draft), createdAt: Date.now() },
+        {
+          id: createId("msg"),
+          role: "pet",
+          type: "structuredPlan",
+          content: "我先把这句话拆成一条可以直接走的旅程。",
+          createdAt: Date.now(),
+          structuredPlan: journeyPlan.structuredPlan,
+        },
       ],
-    }));
+    }, [journeyPlan.card]));
+  }
+
+  function askPetForAdvice(): void {
+    setState((current) => {
+      const currentPet = getActivePetFromState(current);
+      return finalizeState({
+        ...current,
+        route: "companion",
+        messages: [
+          ...current.messages,
+          {
+            id: createId("msg"),
+            role: "pet",
+            type: "text",
+            content: createPetAdvice(currentPet),
+            createdAt: Date.now(),
+          },
+        ],
+      });
+    });
   }
 
   function selectPet(petId: string): void {
@@ -459,7 +721,7 @@ export function useDemoState() {
       const nextPets = normalizePets(current.pets, petId);
       const nextActivePet = getActivePetFromState({ pets: nextPets, selectedPetId: petId });
 
-      return {
+      return finalizeState({
         ...current,
         selectedPetId: petId,
         pets: nextPets,
@@ -470,14 +732,24 @@ export function useDemoState() {
           playerHp: current.battle.playerMaxHp,
           logs: [createBattleIntroLog(nextActivePet.name)],
         },
-      };
+        messages: [
+          ...current.messages,
+          {
+            id: createId("msg"),
+            role: "pet",
+            type: "systemEvent",
+            content: `已切换为${nextActivePet.name}，后续建议和对战开场会跟着变化。`,
+            createdAt: Date.now(),
+          },
+        ],
+      });
     });
   }
 
   function feedPet(): void {
     setState((current) => {
       if (current.wallet.crystal < 18) return current;
-      return {
+      return finalizeState({
         ...current,
         wallet: { ...current.wallet, crystal: current.wallet.crystal - 18 },
         pets: current.pets.map((pet) =>
@@ -485,7 +757,7 @@ export function useDemoState() {
             ? { ...pet, mood: clamp(pet.mood + 12, 0, 100), affection: clamp(pet.affection + 8, 0, 100) }
             : pet,
         ),
-      };
+      });
     });
   }
 
@@ -495,7 +767,7 @@ export function useDemoState() {
       if (!target || target.redeemed) return current;
 
       const nextSteps = current.steps.map((step) => (step.id === stepId ? { ...step, redeemed: true } : step));
-      return {
+      return finalizeState({
         ...current,
         wallet: { ...current.wallet, energy: current.wallet.energy + target.energyEarned },
         steps: nextSteps,
@@ -504,7 +776,7 @@ export function useDemoState() {
           ...current.messages,
           { id: createId("msg"), role: "pet", type: "systemEvent", content: `步数到账：${target.energyEarned} 点能量已经放进你的奖励页，现在可以考虑兑换成晶石了。`, createdAt: Date.now() },
         ],
-      };
+      });
     });
   }
 
@@ -512,7 +784,7 @@ export function useDemoState() {
     setState((current) => {
       const crystals = Math.floor(current.wallet.energy / 10);
       if (crystals <= 0) return current;
-      return {
+      return finalizeState({
         ...current,
         wallet: {
           ...current.wallet,
@@ -529,14 +801,14 @@ export function useDemoState() {
             createdAt: Date.now(),
           },
         ],
-      };
+      });
     });
   }
 
   function exploreNode(nodeId: string): void {
     setState((current) => {
       if (current.wallet.energy < 5) return current;
-      return {
+      return finalizeState({
         ...current,
         wallet: { ...current.wallet, energy: clamp(current.wallet.energy - 5, 0, seedState.wallet.energy), crystal: current.wallet.crystal + 12 },
         mapNodes: current.mapNodes.map((node) => (node.id === nodeId ? { ...node, explored: node.explored + 1 } : node)),
@@ -544,7 +816,7 @@ export function useDemoState() {
           ...current.messages,
           { id: createId("msg"), role: "pet", type: "systemEvent", content: "探索成功，带回 12 枚像素晶石，还顺手点亮了一段新的地图记忆。", createdAt: Date.now() },
         ],
-      };
+      });
     });
   }
 
@@ -552,7 +824,7 @@ export function useDemoState() {
     setState((current) => {
       if (current.wallet.energy < 10) return current;
       const currentActivePet = getActivePetFromState(current);
-      return {
+      return finalizeState({
         ...current,
         wallet: { ...current.wallet, energy: clamp(current.wallet.energy - 10, 0, seedState.wallet.energy) },
         battle: {
@@ -562,7 +834,7 @@ export function useDemoState() {
           playerHp: current.battle.playerMaxHp,
           logs: [createBattleOpeningLog(currentActivePet.name)],
         },
-      };
+      });
     });
   }
 
@@ -571,14 +843,14 @@ export function useDemoState() {
       if (!current.battle.active) return current;
       const currentActivePet = getActivePetFromState(current);
       if (action === "escape") {
-        return {
+        return finalizeState({
           ...current,
           battle: {
             ...current.battle,
             active: false,
             logs: [`${currentActivePet.name} 先撤退了，把能量留给更重要的任务。`],
           },
-        };
+        });
       }
 
       const enemyHp = action === "attack" ? clamp(current.battle.enemyHp - 28, 0, current.battle.enemyMaxHp) : current.battle.enemyHp;
@@ -586,7 +858,7 @@ export function useDemoState() {
       const playerHpBase = action === "heal" ? current.battle.playerHp + healAmount : current.battle.playerHp;
 
       if (enemyHp <= 0) {
-        return {
+        return finalizeState({
           ...current,
           wallet: { ...current.wallet, crystal: current.wallet.crystal + 20 },
           battle: {
@@ -595,10 +867,10 @@ export function useDemoState() {
             enemyHp,
             logs: [`${currentActivePet.name} 赢下了这场试炼，额外拿到 20 晶石。`],
           },
-        };
+        });
       }
 
-      return {
+      return finalizeState({
         ...current,
         battle: {
           ...current.battle,
@@ -613,7 +885,7 @@ export function useDemoState() {
             "系统反击，造成 16 点伤害。",
           ],
         },
-      };
+      });
     });
   }
 
@@ -644,7 +916,7 @@ export function useDemoState() {
             ? "像素零食喂好了，当前陪伴的心情和亲密度都升了一点。"
             : "荧光围巾已经换上，当前陪伴的形象更醒目了。";
 
-      return {
+      return finalizeState({
         ...current,
         wallet: {
           ...current.wallet,
@@ -656,7 +928,7 @@ export function useDemoState() {
           ...current.messages,
           { id: createId("msg"), role: "pet", type: "systemEvent", content: purchaseMessage, createdAt: Date.now() },
         ],
-      };
+      });
     });
   }
 
@@ -677,6 +949,7 @@ export function useDemoState() {
     activePet,
     selectedPreset,
     completedMinutes,
+    generateJourneyPlan,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward: canClaimCurrentFocusReward,
@@ -691,6 +964,7 @@ export function useDemoState() {
     toggleTask,
     runAiAction,
     sendDraftMessage,
+    askPetForAdvice,
     selectPet,
     feedPet,
     redeemStep,

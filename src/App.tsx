@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { PixelPet } from "./components/PixelPet";
 import { mainRoutes, routeLabels } from "./data/seed";
 import { useDemoState } from "./hooks/useDemoState";
-import type { CompanionMessage, FocusPreset, RouteKey, StepLedger, TaskItem } from "./types";
+import type { AICard, CompanionMessage, FocusPreset, RouteKey, StepLedger, StructuredPlan, TaskItem } from "./types";
 
 const presetToneMap: Record<FocusPreset["tone"], string> = {
   sky: "bg-sky/55",
@@ -13,30 +13,44 @@ const presetToneMap: Record<FocusPreset["tone"], string> = {
 };
 
 const routeMeta: Record<RouteKey, { eyebrow: string; caption: string }> = {
-  home: { eyebrow: "旅程封面", caption: "先把今天的主线讲清楚，再带评审继续往前走。" },
+  home: { eyebrow: "旅程封面", caption: "先把今天的主线讲清楚，再顺着这条旅程继续往前走。" },
   focus: { eyebrow: "核心章节", caption: "让一轮专注真正带来奖励、成长和下一步动作。" },
   companion: { eyebrow: "陪伴整理", caption: "把一句目标拆成顺手的动作，让宠物承担引导角色。" },
   pets: { eyebrow: "陪伴图鉴", caption: "让角色成长和情绪反馈参与整个演示闭环。" },
   explore: { eyebrow: "旅程地图", caption: "把已经赚到的能量继续带去冒险，而不是停在账面上。" },
   bank: { eyebrow: "奖励中转", caption: "把步数奖励收进能量池，再决定兑换还是继续使用。" },
-  achievements: { eyebrow: "展示证据", caption: "把专注、奖励和收集痕迹整理成一页可展示的成绩册。" },
-  battle: { eyebrow: "试炼插曲", caption: "用一场轻量试炼展示状态变化、资源门槛和反馈节奏。" },
+  achievements: { eyebrow: "成长记录", caption: "把专注、奖励和收集痕迹整理成一页清楚的成绩册。" },
+  battle: { eyebrow: "试炼插曲", caption: "用一场轻量试炼感受状态变化、资源门槛和反馈节奏。" },
   shop: { eyebrow: "补给铺", caption: "给旅程加一点补给和装饰，而不是做普通商品列表。" },
 };
 
 const shopItems = [
-  { id: "snack", title: "像素零食", price: 24, description: "给当前陪伴补一点心情和亲密度，适合顺手展示即时反馈。" },
+  { id: "snack", title: "像素零食", price: 24, description: "给当前陪伴补一点心情和亲密度，适合在推进主线前顺手补状态。" },
   { id: "tea", title: "薄荷茶", price: 18, description: "回复 20 点能量，让探索或对战可以继续推进。" },
-  { id: "scarf", title: "荧光围巾", price: 66, description: "给当前宠物换一层更有展示感的形象。" },
+  { id: "scarf", title: "荧光围巾", price: 66, description: "给当前宠物换一层更醒目的形象，让陪伴感更强。" },
 ] as const;
 
 const extendedDemoRoutes: RouteKey[] = ["pets", "shop", "battle", "achievements"];
 
 const companionPrompts = [
-  { label: "先排今天主线", value: "先帮我排今天的主线：做一轮专注、领一次能量，再决定要不要继续探索。" },
-  { label: "想把奖励讲清楚", value: "我想把专注、步数奖励、兑换晶石和探索之间的关系讲得更顺。" },
-  { label: "先安排陪伴互动", value: "先帮我把陪伴互动接进主线里，别让它只是装饰。" },
+  { label: "帮我拆成 3 步", value: "帮我把今天要推进的事拆成 3 步，越顺手越好。" },
+  { label: "我现在更适合专注还是休息", value: "我现在有点乱，帮我判断更适合先专注、先热身还是先休息整理。" },
+  { label: "把今天主线讲清楚", value: "把今天的主线讲清楚：专注、领奖、探索和陪伴之间应该怎么接。" },
 ] as const;
+
+const petRoleCopy: Record<string, string> = {
+  sheep: "更适合做温和的起步陪伴，帮你把今天先走起来。",
+  beagle: "更适合做推进型搭档，鼓励你快一点把主线跑完。",
+  "night-cat": "更适合做复盘和整理型陪伴，帮你把节奏收紧。",
+  "rest-rabbit": "更适合做缓冲型搭档，适合先轻一点地把状态拉起来。",
+};
+
+const achievementEvidenceCopy: Record<string, string> = {
+  "a-1": "这是主循环成立的证据",
+  "a-2": "这是资源系统被看懂的证据",
+  "a-3": "这是陪伴角色被建立起来的证据",
+  "a-4": "这是节奏能持续运转的证据",
+};
 
 function formatTimer(totalSeconds: number): string {
   const safeValue = Math.max(totalSeconds, 0);
@@ -54,6 +68,7 @@ function relativeTime(timestamp: number): string {
 
 function messageTone(type: CompanionMessage["type"], role: CompanionMessage["role"]): string {
   if (role === "user") return "bg-sky/45 border-sky/50";
+  if (type === "structuredPlan") return "bg-white/88 border-black/[0.08]";
   if (type === "reward") return "bg-amber/45 border-amber/55";
   if (type === "systemEvent") return "bg-sage/42 border-sage/50";
   if (type === "imageCard") return "bg-peach/42 border-peach/50";
@@ -155,7 +170,107 @@ function PromptChip({ label, onClick }: { label: string; onClick: () => void }) 
   );
 }
 
-function AchievementSeal({ title, description, unlocked, index }: { title: string; description: string; unlocked: boolean; index: number }) {
+function AiModule({
+  eyebrow = "AI 陪伴建议",
+  title,
+  description,
+  steps,
+  primaryLabel,
+  onPrimary,
+  primaryDisabled,
+  secondaryLabel,
+  onSecondary,
+  secondaryDisabled,
+}: {
+  eyebrow?: string;
+  title: string;
+  description: string;
+  steps?: string[];
+  primaryLabel: string;
+  onPrimary: () => void;
+  primaryDisabled?: boolean;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDisabled?: boolean;
+}) {
+  return (
+    <section className="ai-panel">
+      <p className="ai-eyebrow">{eyebrow}</p>
+      <h3 className="mt-2 text-xl font-black tracking-tight text-ink">{title}</h3>
+      <p className="mt-3 text-sm leading-6 text-mist">{description}</p>
+      {steps?.length ? (
+        <div className="mt-4 space-y-2">
+          {steps.map((step, index) => (
+            <div key={`${step}-${index}`} className="ai-step-row">
+              <span className="ai-step-index">{index + 1}</span>
+              <p className="text-sm leading-6 text-ink">{step}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        <button type="button" className="story-button" disabled={primaryDisabled} onClick={onPrimary}>
+          {primaryLabel}
+        </button>
+        {secondaryLabel && onSecondary ? (
+          <button type="button" className="story-button-secondary" disabled={secondaryDisabled} onClick={onSecondary}>
+            {secondaryLabel}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function StructuredPlanCard({
+  plan,
+  onPrimary,
+  onSecondary,
+}: {
+  plan: StructuredPlan;
+  onPrimary: () => void;
+  onSecondary: () => void;
+}) {
+  return (
+    <div className="ai-panel">
+      <div className="flex items-center justify-between gap-3">
+        <p className="ai-eyebrow">整理结果</p>
+        <span className="story-chip">{plan.recommendedDuration}</span>
+      </div>
+      <div className="mt-4 grid gap-3">
+        <div className="ai-mini-card">
+          <p className="ai-mini-title">你现在要推进的是</p>
+          <p className="mt-2 text-sm leading-6 text-ink">{plan.goalSummary}</p>
+        </div>
+        <div className="ai-mini-card">
+          <p className="ai-mini-title">建议顺序</p>
+          <div className="mt-2 space-y-2">
+            {plan.steps.map((step, index) => (
+              <div key={`${step}-${index}`} className="ai-step-row">
+                <span className="ai-step-index">{index + 1}</span>
+                <p className="text-sm leading-6 text-ink">{step}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="ai-mini-card">
+          <p className="ai-mini-title">下一步</p>
+          <p className="mt-2 text-sm leading-6 text-ink">{plan.nextAction}</p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        <button type="button" className="story-button" onClick={onPrimary}>
+          按这个顺序去做
+        </button>
+        <button type="button" className="story-button-secondary" onClick={onSecondary}>
+          重新整理
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AchievementSeal({ title, description, unlocked, index, evidence }: { title: string; description: string; unlocked: boolean; index: number; evidence: string }) {
   return (
     <article className={`stamp-card ${unlocked ? "stamp-card-active" : "stamp-card-muted"}`}>
       <div className="flex items-start justify-between gap-3">
@@ -164,6 +279,7 @@ function AchievementSeal({ title, description, unlocked, index }: { title: strin
       </div>
       <h3 className="mt-6 text-lg font-black tracking-tight text-ink">{title}</h3>
       <p className="mt-2 text-sm leading-6 text-mist">{description}</p>
+      <p className="mt-4 text-xs font-semibold tracking-[0.08em] text-ink/75">{evidence}</p>
     </article>
   );
 }
@@ -174,6 +290,7 @@ export default function App() {
     activePet,
     selectedPreset,
     completedMinutes,
+    generateJourneyPlan,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward,
@@ -188,6 +305,7 @@ export default function App() {
     toggleTask,
     runAiAction,
     sendDraftMessage,
+    askPetForAdvice,
     selectPet,
     feedPet,
     redeemStep,
@@ -200,7 +318,7 @@ export default function App() {
 
   const openTasks = useMemo(() => state.tasks.filter((task) => task.status !== "done"), [state.tasks]);
   const completedSessions = useMemo(() => state.sessions.filter((session) => session.status === "completed"), [state.sessions]);
-  const recentMessages = useMemo(() => state.messages.slice(-6), [state.messages]);
+  const recentMessages = useMemo(() => state.messages.filter((message) => message.type !== "structuredPlan").slice(-6), [state.messages]);
   const todayCrystal = useMemo(() => completedSessions.reduce((sum, item) => sum + item.crystalReward, 0), [completedSessions]);
   const activePetProgress = Math.min(100, (activePet.exp / (activePet.level * 12)) * 100);
   const claimableEnergy = useMemo(
@@ -231,6 +349,58 @@ export default function App() {
 
     return state.battle.logs;
   }, [activePet.name, state.battle.active, state.battle.enemyName, state.battle.logs]);
+  const latestFocusRecapCard = useMemo<AICard | undefined>(
+    () => state.aiCards.find((card) => card.type === "focusRecap"),
+    [state.aiCards],
+  );
+  const latestResourceAdviceCard = useMemo<AICard | undefined>(
+    () => state.aiCards.find((card) => card.type === "resourceAdvice"),
+    [state.aiCards],
+  );
+  const latestContextHintCard = useMemo<AICard | undefined>(
+    () => state.aiCards.find((card) => card.type === "contextHint"),
+    [state.aiCards],
+  );
+  const latestStructuredPlan = useMemo<StructuredPlan | undefined>(
+    () => [...state.messages].reverse().find((message) => message.type === "structuredPlan" && message.structuredPlan)?.structuredPlan,
+    [state.messages],
+  );
+  const recommendedExploreNode = useMemo(
+    () =>
+      state.mapNodes.find((node) => completedMinutes >= node.unlockMinutes && node.explored === 0)
+      ?? [...state.mapNodes].reverse().find((node) => completedMinutes >= node.unlockMinutes)
+      ?? state.mapNodes[0],
+    [completedMinutes, state.mapNodes],
+  );
+  const shopRecommendation = useMemo(() => {
+    if (state.wallet.energy < 15) {
+      return {
+        itemId: "tea" as const,
+        title: "现在更值得买哪一个",
+        description: "如果你准备继续探索或对战，薄荷茶是更直接的补给。",
+      };
+    }
+
+    if (activePet.activeSkin !== "荧光围巾" && state.wallet.crystal >= 66) {
+      return {
+        itemId: "scarf" as const,
+        title: "现在更值得买哪一个",
+        description: "如果你想让当前陪伴更有记忆点，荧光围巾会是更醒目的选择。",
+      };
+    }
+
+    return {
+      itemId: "snack" as const,
+      title: "现在更值得买哪一个",
+        description: "如果你想先照顾当前陪伴的状态，可以先买像素零食。",
+    };
+  }, [activePet.activeSkin, state.wallet.crystal, state.wallet.energy]);
+  const achievementSummary = useMemo(() => {
+    const unlockedCount = state.achievements.filter((item) => item.unlocked).length;
+    return unlockedCount >= 3
+      ? "你已经把专注奖励、步数领奖和资源继续流动串起来了，这说明这是一条完整的互动闭环。"
+      : "你已经开始点亮主循环，接下来再补一段探索或奖励流动，整套旅程会更完整。";
+  }, [state.achievements]);
 
   const homeStory = useMemo(() => {
     if (state.focus.running) {
@@ -253,7 +423,7 @@ export default function App() {
       return {
         eyebrow: "下一步",
         title: "先完成一轮专注，把奖励闭环真正启动起来",
-        description: "当面试官看到你先专注、再领奖、再探索时，主线会更清楚，也更可信。",
+        description: "先专注、再领奖、再探索，整条主线会更清楚，也更顺。",
       };
     }
 
@@ -265,7 +435,7 @@ export default function App() {
   }, [claimableEnergy, openTasks.length, state.focus.running]);
 
   const homePrimaryLabel = state.focus.running ? "继续当前专注" : claimableEnergy > 0 ? "领取步数能量" : "开始本轮专注";
-  const homeSecondaryLabel = state.focus.running ? "去陪伴页看任务" : claimableEnergy > 0 ? "再开下一轮专注" : "先整理任务";
+  const homeSecondaryLabel = state.focus.running ? "去陪伴页看任务" : claimableEnergy > 0 ? "再开下一轮专注" : "让陪伴帮我整理主线";
   const focusRuleCopy = !state.focus.running
     ? "倒计时模式会在归零后自动结算；正计时达到目标时长后，才会开放领奖按钮。需要快速录屏或测试时，可以使用演示跳过。"
     : state.focus.mode === "pomodoro"
@@ -299,6 +469,23 @@ export default function App() {
   const focusCrystalReward = state.focus.durationMinutes * 3;
   const focusExpReward = state.focus.durationMinutes * 2;
   const focusStatusLabel = !state.focus.running ? "待开始" : canClaimFocusReward ? "可领奖" : "进行中";
+
+  function goToRouteOrStart(route?: RouteKey): void {
+    if (!route) return;
+    if (route === "focus" && !state.focus.running) {
+      startFocus();
+      return;
+    }
+    setRoute(route);
+  }
+
+  function handleResourceSecondaryAction(): void {
+    if (latestResourceAdviceCard?.secondaryLabel === "按建议兑换成晶石") {
+      exchangeEnergy();
+      return;
+    }
+    goToRouteOrStart(latestResourceAdviceCard?.secondaryRoute);
+  }
 
   return (
     <div className="mx-auto flex min-h-screen w-full items-center justify-center px-4 py-6 sm:px-6">
@@ -399,10 +586,11 @@ export default function App() {
                     {homeSecondaryLabel}
                   </button>
                 </div>
+
               </section>
 
               <section className="section-slab">
-                <SectionTitle eyebrow="主循环" title="今天把这条旅程点亮" caption="这不是模块总览，而是让评审快速看懂价值的一条路径。" />
+                <SectionTitle eyebrow="主循环" title="今天把这条旅程点亮" caption="这不是模块总览，而是一条顺着走就能看懂的路径。" />
                 <div className="space-y-1">
                   {journeySteps.map((step) => (
                     <JourneyStep key={step.index} index={step.index} title={step.title} copy={step.copy} status={step.status} />
@@ -411,7 +599,7 @@ export default function App() {
               </section>
 
               <section className="section-slab">
-                <SectionTitle eyebrow="次级章节" title="更多玩法" caption="这些模块保留展示，但不应该抢走首页对主循环的注意力。" />
+                <SectionTitle eyebrow="次级章节" title="更多玩法" caption="这些模块会继续保留，但不应该抢走首页对主循环的注意力。" />
                 <div className="flex flex-wrap gap-2.5">
                   {extendedDemoRoutes.map((route) => (
                     <button key={route} type="button" className="route-pill" onClick={() => setRoute(route)}>
@@ -471,6 +659,27 @@ export default function App() {
                   </div>
                 </div>
               </section>
+
+              <AiModule
+                eyebrow="陪伴建议"
+                title="陪伴建议"
+                description={
+                  !state.focus.running
+                    ? "你现在更适合先做一轮 15 到 25 分钟的推进，把今天的节奏拉起来。"
+                    : state.focus.mode === "pomodoro"
+                      ? "这轮更适合专注完成，不建议中途切去处理奖励。"
+                      : "达到目标时长后再领奖，会更像一次完整推进。"
+                }
+                primaryLabel="按这个节奏开始"
+                onPrimary={() => {
+                  if (!state.focus.running) {
+                    startFocus();
+                  }
+                }}
+                primaryDisabled={state.focus.running}
+                secondaryLabel="先整理任务"
+                onSecondary={() => setRoute("companion")}
+              />
 
               <section className="section-slab">
                 <SectionTitle
@@ -572,6 +781,18 @@ export default function App() {
                   </div>
                 )}
               </section>
+
+              {latestFocusRecapCard ? (
+                <AiModule
+                  eyebrow="AI 复盘卡"
+                  title={latestFocusRecapCard.title}
+                  description={latestFocusRecapCard.description}
+                  primaryLabel={latestFocusRecapCard.ctaLabel}
+                  onPrimary={() => goToRouteOrStart(latestFocusRecapCard.ctaRoute)}
+                  secondaryLabel={latestFocusRecapCard.secondaryLabel}
+                  onSecondary={() => goToRouteOrStart(latestFocusRecapCard.secondaryRoute)}
+                />
+              ) : null}
             </>
           )}
 
@@ -585,7 +806,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <SectionTitle eyebrow="陪伴工作台" title={`${activePet.name} 会先帮你把目标理顺`} caption="先点一个一句话 prompt，再决定要不要继续自由输入，会比大段打字更适合移动端和演示。" />
+                    <SectionTitle eyebrow="AI 陪伴工作台" title="把一句模糊目标，拆成可走的下一步" caption="这里不是泛聊天，而是把目标整理成任务、顺序和建议时长。" />
                   </div>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2.5">
@@ -606,8 +827,16 @@ export default function App() {
                 </div>
               </section>
 
+              {latestStructuredPlan ? (
+                <StructuredPlanCard
+                  plan={latestStructuredPlan}
+                  onPrimary={() => goToRouteOrStart(latestStructuredPlan.nextRoute)}
+                  onSecondary={generateJourneyPlan}
+                />
+              ) : null}
+
               <section className="section-slab">
-                <SectionTitle eyebrow="最近对话" title="把关键互动整理成纸条" caption="这里不是普通聊天记录，而是演示陪伴如何持续把用户推向下一步。" />
+                <SectionTitle eyebrow="最近对话" title="把关键互动整理成纸条" caption="这里不是普通聊天记录，而是陪伴如何持续把你推向下一步。" />
                 <div className="space-y-4">
                   {recentMessages.map((message) => (
                     <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
@@ -652,7 +881,7 @@ export default function App() {
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <p className="text-xs text-mist">回车发送，Shift + Enter 换行</p>
                   <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft} onClick={sendDraftMessage}>
-                    发送给陪伴
+                    让陪伴帮我整理
                   </button>
                 </div>
               </section>
@@ -722,6 +951,17 @@ export default function App() {
                 </div>
               </section>
 
+              <AiModule
+                eyebrow="AI 陪伴角色卡"
+                title="它现在更适合扮演什么角色"
+                description={petRoleCopy[activePet.id] ?? "它更适合做这段旅程里的温柔提醒者。"}
+                primaryLabel="设为当前陪伴"
+                onPrimary={() => selectPet(activePet.id)}
+                primaryDisabled
+                secondaryLabel="让它给我一句建议"
+                onSecondary={askPetForAdvice}
+              />
+
               <section className="section-slab">
                 <SectionTitle eyebrow="图鉴" title="已解锁的陪伴阵列" caption="切换陪伴时，也是在切换整个界面的情绪和叙事角色。" />
                 <div className="grid grid-cols-2 gap-3">
@@ -764,6 +1004,21 @@ export default function App() {
                 </div>
               </section>
 
+              <AiModule
+                eyebrow="AI 路线建议"
+                title="这一步最适合去哪里"
+                description={
+                  recommendedExploreNode.id === "meadow"
+                    ? "如果你想先走一条最顺的路线，优先去晨露草坪，路径最短、反馈最直接。"
+                    : "你已经有足够的专注积累，可以继续往更深一层的地图推进。"
+                }
+                primaryLabel="按建议探索"
+                onPrimary={() => exploreNode(recommendedExploreNode.id)}
+                primaryDisabled={state.wallet.energy < 5 || completedMinutes < recommendedExploreNode.unlockMinutes}
+                secondaryLabel="先回奖励页"
+                onSecondary={() => setRoute("bank")}
+              />
+
               <section className="section-slab">
                 <SectionTitle eyebrow="路径节点" title="沿着一条线把地图点亮" caption="节点不再只是列表项目，而是旅程本身的进度证据。" />
                 <div className="space-y-5">
@@ -783,6 +1038,9 @@ export default function App() {
                             <div className="min-w-0 flex-1">
                               <p className="text-lg font-black tracking-tight text-ink">{node.title}</p>
                               <p className="mt-2 text-sm leading-6 text-mist">解锁条件 {node.unlockMinutes} 分钟 · 已探索 {node.explored} 次 · 每次消耗 5 能量</p>
+                              <p className="mt-2 text-xs font-semibold tracking-[0.08em] text-ink/70">
+                                {index === 0 ? "适合先从这里开始" : index === 1 ? "更适合继续往前推进" : "需要更长专注积累"}
+                              </p>
                             </div>
                             <button
                               type="button"
@@ -831,9 +1089,29 @@ export default function App() {
                   disabled={state.wallet.energy < 10}
                   onClick={exchangeEnergy}
                 >
-                  {state.wallet.energy < 10 ? "能量不足 10，暂时不能兑换" : "把当前能量兑换成像素晶石"}
+                  {state.wallet.energy < 10 ? "能量不足 10，暂时不能兑换" : "按建议兑换成晶石"}
                 </button>
               </section>
+
+              {latestResourceAdviceCard ? (
+                <AiModule
+                  eyebrow="AI 资源建议"
+                  title={latestResourceAdviceCard.title}
+                  description={latestResourceAdviceCard.description}
+                  primaryLabel={latestResourceAdviceCard.ctaLabel}
+                  onPrimary={() => {
+                    const nextStep = state.steps.find((item) => !item.redeemed);
+                    if (latestResourceAdviceCard.ctaRoute === "bank" && nextStep) {
+                      redeemStep(nextStep.id);
+                      return;
+                    }
+                    goToRouteOrStart(latestResourceAdviceCard.ctaRoute);
+                  }}
+                  primaryDisabled={latestResourceAdviceCard.ctaRoute === "bank" && !state.steps.some((item) => !item.redeemed)}
+                  secondaryLabel={latestResourceAdviceCard.secondaryLabel}
+                  onSecondary={handleResourceSecondaryAction}
+                />
+              ) : null}
 
               <section className="section-slab">
                 <SectionTitle eyebrow="奖励票据" title="把今天赚到的步数奖励一张张收进来" caption="领取动作需要有收集感，而不是像表单一样被处理掉。" />
@@ -848,10 +1126,26 @@ export default function App() {
 
           {state.route === "achievements" && (
             <section className="section-slab hero-slab">
-              <SectionTitle eyebrow="成绩册" title="把这次演示里最值得被看到的痕迹盖成印章" caption="这一页不只是展示结果，也是面试官确认你做了哪些状态设计的证据墙。" trailing={<span className="story-chip">已解锁 {state.achievements.filter((item) => item.unlocked).length}</span>} />
-              <div className="grid grid-cols-2 gap-3">
+              <SectionTitle eyebrow="成绩册" title="把这段旅程里最值得留下的痕迹盖成印章" caption="这一页不只是结果汇总，也是一路走来的状态记录。" trailing={<span className="story-chip">已解锁 {state.achievements.filter((item) => item.unlocked).length}</span>} />
+              <AiModule
+                eyebrow="AI 旅程总结卡"
+                title="这段旅程里，最值得留下的是"
+                description={achievementSummary}
+                primaryLabel="回到首页继续走"
+                onPrimary={() => setRoute("home")}
+                secondaryLabel="再补一段探索"
+                onSecondary={() => setRoute("explore")}
+              />
+              <div className="mt-4 grid grid-cols-2 gap-3">
                 {state.achievements.map((achievement, index) => (
-                  <AchievementSeal key={achievement.id} title={achievement.title} description={achievement.description} unlocked={achievement.unlocked} index={index} />
+                  <AchievementSeal
+                    key={achievement.id}
+                    title={achievement.title}
+                    description={achievement.description}
+                    unlocked={achievement.unlocked}
+                    index={index}
+                    evidence={achievementEvidenceCopy[achievement.id] ?? "这是这段旅程里留下的一段证据"}
+                  />
                 ))}
               </div>
             </section>
@@ -861,6 +1155,20 @@ export default function App() {
             <>
               <section className="section-slab hero-slab">
                 <SectionTitle eyebrow="试炼场" title="打一场轻量遭遇，展示资源门槛和状态变化" caption="这页更像旅程插曲，而不是独立 mini game，所以视觉会继续服从整套手账壳子。" trailing={<span className="story-chip">消耗 10 能量</span>} />
+                {latestContextHintCard ? (
+                  <div className="mb-4">
+                    <AiModule
+                      eyebrow="AI 导演提示"
+                      title={latestContextHintCard.title}
+                      description="这页的重点不是赢，而是感受资源消耗、状态变化和即时反馈。建议打一轮攻击，再看是否继续。"
+                      primaryLabel="开始一场试炼"
+                      onPrimary={startBattle}
+                      primaryDisabled={state.wallet.energy < 10}
+                      secondaryLabel="先看资源建议"
+                      onSecondary={() => setRoute("bank")}
+                    />
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="note-strip !p-4">
                     <div className="grid h-24 place-items-center">
@@ -887,6 +1195,7 @@ export default function App() {
                 </div>
 
                 <div className="note-strip mt-5 text-sm leading-6 text-mist">
+                  <p className="mb-2 text-xs font-semibold tracking-[0.08em] text-ink/70">当前陪伴会参与开场说明和战斗反馈。</p>
                   {battleNarration.map((log, index) => (
                     <p key={`${log}-${index}`}>{log}</p>
                   ))}
@@ -894,7 +1203,7 @@ export default function App() {
               </section>
 
               <section className="section-slab">
-                <SectionTitle eyebrow="操作" title="让动作和反馈简短但清楚" caption="这页的重点不是复杂战斗，而是展示状态改变、资源扣减和胜利奖励。" />
+                <SectionTitle eyebrow="操作" title="让动作和反馈简短但清楚" caption="这页的重点不是复杂战斗，而是感受状态改变、资源扣减和胜利奖励。" />
                 <div className="grid gap-3">
                   <button
                     type="button"
@@ -902,13 +1211,13 @@ export default function App() {
                     disabled={state.wallet.energy < 10}
                     onClick={startBattle}
                   >
-                    {state.wallet.energy < 10 ? "能量不足，暂时不能开始" : state.battle.active ? "重新开始对战" : "开始对战"}
+                    {state.wallet.energy < 10 ? "能量不足，暂时不能开始" : state.battle.active ? "重新开始试炼" : "开始一场试炼"}
                   </button>
                   <div className="grid grid-cols-2 gap-3">
-                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("attack")}>攻击</button>
-                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("heal")}>治疗</button>
-                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("guard")}>防御</button>
-                    <button type="button" className="story-button-soft" disabled={!state.battle.active} onClick={() => battleAction("escape")}>撤退</button>
+                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("attack")}>发起攻击</button>
+                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("heal")}>回复状态</button>
+                    <button type="button" className="story-button-secondary" disabled={!state.battle.active} onClick={() => battleAction("guard")}>稳住节奏</button>
+                    <button type="button" className="story-button-soft" disabled={!state.battle.active} onClick={() => battleAction("escape")}>结束这场试炼</button>
                   </div>
                 </div>
               </section>
@@ -917,10 +1226,20 @@ export default function App() {
 
           {state.route === "shop" && (
             <section className="section-slab hero-slab">
-              <SectionTitle eyebrow="补给铺" title="给这段旅程带一点补给和装饰" caption="商店会更像手账里的补给页：东西不多，但每件都能直接对应到一次演示反馈。" trailing={<span className="story-chip">可用晶石 {state.wallet.crystal}</span>} />
+              <SectionTitle eyebrow="补给铺" title="给这段旅程带一点补给和装饰" caption="商店会更像手账里的补给页：东西不多，但每件都能直接对应到一次即时反馈。" trailing={<span className="story-chip">可用晶石 {state.wallet.crystal}</span>} />
+              <AiModule
+                eyebrow="AI 补给建议"
+                title={shopRecommendation.title}
+                description={shopRecommendation.description}
+                primaryLabel="按建议购买"
+                onPrimary={() => buyItem(shopRecommendation.itemId)}
+                primaryDisabled={state.wallet.crystal < shopItems.find((item) => item.id === shopRecommendation.itemId)!.price}
+                secondaryLabel="先不买，继续主线"
+                onSecondary={() => setRoute("home")}
+              />
               <div className="space-y-3">
                 {shopItems.map((item) => (
-                  <article key={item.id} className="ticket-card">
+                  <article key={item.id} className="ticket-card mt-3">
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
                         <p className="text-lg font-black tracking-tight text-ink">{item.title}</p>

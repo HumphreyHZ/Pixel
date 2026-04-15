@@ -716,6 +716,16 @@ export function useDemoState() {
     });
   }
 
+  function clearMessages(): void {
+    setState((current) => {
+      if (current.messages.length === 0) return current;
+      return finalizeState({
+        ...current,
+        messages: [],
+      });
+    });
+  }
+
   function selectPet(petId: string): void {
     setState((current) => {
       const nextPets = normalizePets(current.pets, petId);
@@ -964,6 +974,7 @@ export function useDemoState() {
     toggleTask,
     runAiAction,
     sendDraftMessage,
+    clearMessages,
     askPetForAdvice,
     selectPet,
     feedPet,

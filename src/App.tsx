@@ -222,7 +222,7 @@ function AiModule({
   );
 }
 
-function StructuredPlanCard({
+function StructuredPlanMessage({
   plan,
   onPrimary,
   onSecondary,
@@ -232,17 +232,17 @@ function StructuredPlanCard({
   onSecondary: () => void;
 }) {
   return (
-    <div className="ai-panel">
+    <div>
       <div className="flex items-center justify-between gap-3">
-        <p className="ai-eyebrow">整理结果</p>
+        <p className="ai-eyebrow">陪伴整理</p>
         <span className="story-chip">{plan.recommendedDuration}</span>
       </div>
-      <div className="mt-4 grid gap-3">
-        <div className="ai-mini-card">
+      <div className="mt-4 space-y-4">
+        <div>
           <p className="ai-mini-title">你现在要推进的是</p>
           <p className="mt-2 text-sm leading-6 text-ink">{plan.goalSummary}</p>
         </div>
-        <div className="ai-mini-card">
+        <div className="border-t border-black/[0.08] pt-4">
           <p className="ai-mini-title">建议顺序</p>
           <div className="mt-2 space-y-2">
             {plan.steps.map((step, index) => (
@@ -253,16 +253,16 @@ function StructuredPlanCard({
             ))}
           </div>
         </div>
-        <div className="ai-mini-card">
+        <div className="border-t border-black/[0.08] pt-4">
           <p className="ai-mini-title">下一步</p>
           <p className="mt-2 text-sm leading-6 text-ink">{plan.nextAction}</p>
         </div>
       </div>
-      <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        <button type="button" className="story-button" onClick={onPrimary}>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" className="story-button w-auto px-4 py-3" onClick={onPrimary}>
           按这个顺序去做
         </button>
-        <button type="button" className="story-button-secondary" onClick={onSecondary}>
+        <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onSecondary}>
           重新整理
         </button>
       </div>
@@ -305,6 +305,7 @@ export default function App() {
     toggleTask,
     runAiAction,
     sendDraftMessage,
+    clearMessages,
     askPetForAdvice,
     selectPet,
     feedPet,
@@ -318,7 +319,7 @@ export default function App() {
 
   const openTasks = useMemo(() => state.tasks.filter((task) => task.status !== "done"), [state.tasks]);
   const completedSessions = useMemo(() => state.sessions.filter((session) => session.status === "completed"), [state.sessions]);
-  const recentMessages = useMemo(() => state.messages.filter((message) => message.type !== "structuredPlan").slice(-6), [state.messages]);
+  const recentMessages = useMemo(() => state.messages.slice(-6), [state.messages]);
   const todayCrystal = useMemo(() => completedSessions.reduce((sum, item) => sum + item.crystalReward, 0), [completedSessions]);
   const activePetProgress = Math.min(100, (activePet.exp / (activePet.level * 12)) * 100);
   const claimableEnergy = useMemo(
@@ -360,10 +361,6 @@ export default function App() {
   const latestContextHintCard = useMemo<AICard | undefined>(
     () => state.aiCards.find((card) => card.type === "contextHint"),
     [state.aiCards],
-  );
-  const latestStructuredPlan = useMemo<StructuredPlan | undefined>(
-    () => [...state.messages].reverse().find((message) => message.type === "structuredPlan" && message.structuredPlan)?.structuredPlan,
-    [state.messages],
   );
   const recommendedExploreNode = useMemo(
     () =>
@@ -806,7 +803,7 @@ export default function App() {
                     </div>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <SectionTitle eyebrow="AI 陪伴工作台" title="把一句模糊目标，拆成可走的下一步" caption="这里不是泛聊天，而是把目标整理成任务、顺序和建议时长。" />
+                    <SectionTitle eyebrow="陪伴整理台" title="把一句模糊目标，拆成可走的下一步" caption="这里不是泛聊天，而是把目标整理成任务、顺序和建议时长。" />
                   </div>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2.5">
@@ -826,39 +823,59 @@ export default function App() {
                   </button>
                 </div>
               </section>
-
-              {latestStructuredPlan ? (
-                <StructuredPlanCard
-                  plan={latestStructuredPlan}
-                  onPrimary={() => goToRouteOrStart(latestStructuredPlan.nextRoute)}
-                  onSecondary={generateJourneyPlan}
-                />
-              ) : null}
-
               <section className="section-slab">
-                <SectionTitle eyebrow="最近对话" title="把关键互动整理成纸条" caption="这里不是普通聊天记录，而是陪伴如何持续把你推向下一步。" />
+                <SectionTitle
+                  eyebrow="最近对话"
+                  title="把关键互动整理成纸条"
+                  caption="这里不是普通聊天记录，而是陪伴如何持续把你推向下一步。"
+                  trailing={(
+                    <button
+                      type="button"
+                      className="story-button-secondary w-auto px-4 py-2.5 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={recentMessages.length === 0}
+                      onClick={clearMessages}
+                    >
+                      清除记录
+                    </button>
+                  )}
+                />
                 <div className="space-y-4">
-                  {recentMessages.map((message) => (
-                    <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
-                      <span className="text-[11px] font-medium text-mist">{message.role === "user" ? "你" : activePet.name} · {relativeTime(message.createdAt)}</span>
-                      <div className={`message-card ${messageTone(message.type, message.role)}`}>
-                        <p className="text-sm leading-6 text-ink">{message.content}</p>
-                        {message.type === "taskCard" && message.relatedTaskIds ? (
-                          <div className="mt-4">
-                            <TaskList tasks={state.tasks.filter((task) => message.relatedTaskIds?.includes(task.id))} onToggle={toggleTask} />
-                          </div>
-                        ) : null}
-                        {message.type === "imageCard" ? (
-                          <div className="note-strip mt-4">
-                            <div className="mx-auto w-fit">
-                              <PixelPet pet={activePet} size="sm" tone="home" />
+                  {recentMessages.length > 0 ? (
+                    recentMessages.map((message) => (
+                      <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
+                        <span className="text-[11px] font-medium text-mist">{message.role === "user" ? "你" : activePet.name} · {relativeTime(message.createdAt)}</span>
+                        <div className={`message-card ${messageTone(message.type, message.role)}`}>
+                          {message.type === "structuredPlan" && message.structuredPlan ? (
+                            <StructuredPlanMessage
+                              plan={message.structuredPlan}
+                              onPrimary={() => goToRouteOrStart(message.structuredPlan?.nextRoute)}
+                              onSecondary={generateJourneyPlan}
+                            />
+                          ) : (
+                            <p className="text-sm leading-6 text-ink">{message.content}</p>
+                          )}
+                          {message.type === "taskCard" && message.relatedTaskIds ? (
+                            <div className="mt-4">
+                              <TaskList tasks={state.tasks.filter((task) => message.relatedTaskIds?.includes(task.id))} onToggle={toggleTask} />
                             </div>
-                            <p className="mt-3 text-sm font-semibold leading-6 text-ink">{message.quoteRef}</p>
-                          </div>
-                        ) : null}
-                      </div>
-                    </article>
-                  ))}
+                          ) : null}
+                          {message.type === "imageCard" ? (
+                            <div className="note-strip mt-4">
+                              <div className="mx-auto w-fit">
+                                <PixelPet pet={activePet} size="sm" tone="home" />
+                              </div>
+                              <p className="mt-3 text-sm font-semibold leading-6 text-ink">{message.quoteRef}</p>
+                            </div>
+                          ) : null}
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <div className="note-strip">
+                      <p className="text-sm font-semibold text-ink">最近对话已经清空了。</p>
+                      <p className="mt-2 text-sm leading-6 text-mist">说一句你现在想推进的事，陪伴会从新的节奏重新接住你。</p>
+                    </div>
+                  )}
                 </div>
               </section>
 

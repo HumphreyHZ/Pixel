@@ -1,6 +1,19 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { seedState } from "../data/seed";
-import type { AICard, Achievement, DemoState, FocusSession, Pet, RouteKey, StructuredPlan, TaskItem } from "../types";
+import type {
+  AICard,
+  Achievement,
+  CompanionAIAction,
+  CompanionAIContext,
+  CompanionAIRequest,
+  CompanionAIResponse,
+  DemoState,
+  FocusSession,
+  Pet,
+  RouteKey,
+  StructuredPlan,
+  TaskItem,
+} from "../types";
 
 const STORAGE_KEY = "pixel-companion-focus-react-demo";
 const LEGACY_COMPANION_KEYWORDS = [
@@ -10,6 +23,13 @@ const LEGACY_COMPANION_KEYWORDS = [
   "冷冰冰的番茄钟",
   "完成时，让宠物说一句鼓励你的话",
 ];
+const DEFAULT_COMPANION_DRAFT = "我今天有点乱，先帮我决定从哪开始";
+const FALLBACK_NOTICE = "真实整理暂时没有接通，已切回演示整理模式，你仍然可以继续推进主线。";
+const ALLOWED_MODEL_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explore", "bank", "achievements", "battle", "shop"];
+
+type CompanionActionResult = Omit<CompanionAIResponse, "source"> & { source: "model" | "fallback" };
+
+type LocalCompanionIntent = "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "general";
 
 function getPresetMeta(currentState: DemoState, presetId: string) {
   return currentState.presets.find((preset) => preset.id === presetId) ?? currentState.presets[0];
@@ -241,6 +261,285 @@ function canClaimFocusReward(focus: DemoState["focus"], currentTime = Date.now()
   return getFocusElapsedSeconds(focus, currentTime) >= focus.durationMinutes * 60;
 }
 
+function detectLocalCompanionIntent(draft: string): LocalCompanionIntent {
+  const normalized = draft.trim();
+
+  if (/^(你好|您好|嗨|哈喽|hi|hello|早上好|晚上好|在吗)[!！。.？? ]*$/iu.test(normalized)) {
+    return "greeting";
+  }
+
+  if (/(你能做什么|你会什么|你可以做什么|能帮我做什么|怎么帮我|你是谁)/u.test(normalized)) {
+    return "capability";
+  }
+
+  if (/^(谢谢|多谢|感谢|辛苦了|好的|好耶|收到)[!！。.？? ]*$/u.test(normalized)) {
+    return "gratitude";
+  }
+
+  if (/(主线|讲清楚|闭环|怎么接|串起来)/u.test(normalized)) {
+    return "story";
+  }
+
+  if (/(有点乱|很乱|从哪开始|先帮我决定|不知道怎么开始|不知道先做什么)/u.test(normalized)) {
+    return "start";
+  }
+
+  if (/(奖励|能量|兑换|领奖|晶石)/u.test(normalized)) {
+    return "reward";
+  }
+
+  if (/(休息|累|热身|缓一缓|状态不好)/u.test(normalized)) {
+    return "rest";
+  }
+
+  if (/(探索|宠物|图鉴|喂食|互动|地图)/u.test(normalized)) {
+    return "explore";
+  }
+
+  return "general";
+}
+
+function shouldGenerateStructuredReply(draft: string): boolean {
+  const normalized = draft.trim();
+  const intent = detectLocalCompanionIntent(normalized);
+
+  if (["story", "start", "reward", "rest", "explore"].includes(intent)) {
+    return true;
+  }
+
+  return /(帮我|整理|拆成|安排|决定|主线|从哪开始|先做什么|怎么接|讲清楚|规划)/u.test(normalized);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isRouteKey(value: unknown): value is RouteKey {
+  return typeof value === "string" && ALLOWED_MODEL_ROUTES.includes(value as RouteKey);
+}
+
+function parseStructuredPlan(value: unknown): StructuredPlan | null {
+  if (!isRecord(value)) return null;
+  const steps = Array.isArray(value.steps)
+    ? value.steps.filter((item): item is string => isNonEmptyString(item)).map((item) => item.trim()).slice(0, 3)
+    : [];
+
+  if (
+    !isNonEmptyString(value.goalSummary)
+    || steps.length !== 3
+    || !isNonEmptyString(value.recommendedDuration)
+    || !isRouteKey(value.nextRoute)
+    || !isNonEmptyString(value.nextAction)
+    || !isNonEmptyString(value.why)
+  ) {
+    return null;
+  }
+
+  return {
+    goalSummary: value.goalSummary.trim(),
+    steps,
+    recommendedDuration: value.recommendedDuration.trim(),
+    nextRoute: value.nextRoute,
+    nextAction: value.nextAction.trim(),
+    why: value.why.trim(),
+  };
+}
+
+function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft: string): CompanionAIResponse | null {
+  if (!isRecord(data) || data.source !== "model" || !isNonEmptyString(data.content)) {
+    return null;
+  }
+
+  const intent = detectLocalCompanionIntent(draft);
+  const structuredPlan = data.structuredPlan ? parseStructuredPlan(data.structuredPlan) : undefined;
+  const baseResponse: CompanionAIResponse = {
+    content: data.content.trim(),
+    source: "model",
+  };
+
+  if (action === "idea") {
+    if (!isRecord(data.note) || !isNonEmptyString(data.note.title) || !isNonEmptyString(data.note.body) || !isNonEmptyString(data.quoteRef)) {
+      return null;
+    }
+
+    return {
+      ...baseResponse,
+      note: {
+        title: data.note.title.trim().slice(0, 14),
+        body: data.note.body.trim(),
+      },
+      quoteRef: data.quoteRef.trim().slice(0, 28),
+    };
+  }
+
+  if (!structuredPlan && action === "message") {
+    return baseResponse;
+  }
+
+  if (!structuredPlan) {
+    return null;
+  }
+
+  if (action === "tasks") {
+    const tasks = Array.isArray(data.tasks)
+      ? data.tasks.filter((item): item is string => isNonEmptyString(item)).map((item) => item.trim()).slice(0, 3)
+      : [];
+
+    if (tasks.length !== 3) {
+      return null;
+    }
+
+    return {
+      ...baseResponse,
+      structuredPlan,
+      tasks,
+    };
+  }
+
+  return {
+    ...baseResponse,
+    structuredPlan,
+  };
+}
+
+function buildCompanionContext(currentState: DemoState): CompanionAIContext {
+  const claimableEnergy = currentState.steps.filter((item) => !item.redeemed).reduce((sum, item) => sum + item.energyEarned, 0);
+  const activePet = getActivePetFromState(currentState);
+
+  return {
+    recentMessages: currentState.messages.slice(-6).map((message) => ({
+      role: message.role,
+      type: message.type,
+      content: message.content,
+    })),
+    focus: {
+      running: currentState.focus.running,
+      mode: currentState.focus.mode,
+      durationMinutes: currentState.focus.durationMinutes,
+      elapsedSeconds: getFocusElapsedSeconds(currentState.focus),
+    },
+    claimableEnergy,
+    wallet: currentState.wallet,
+    activePet: {
+      id: activePet.id,
+      name: activePet.name,
+      mood: activePet.mood,
+      affection: activePet.affection,
+      level: activePet.level,
+      activeSkin: activePet.activeSkin,
+    },
+    openTasksCount: currentState.tasks.filter((task) => task.status !== "done").length,
+  };
+}
+
+async function requestCompanionModel(action: CompanionAIAction, draft: string, currentState: DemoState): Promise<CompanionAIResponse> {
+  const payload: CompanionAIRequest = {
+    action,
+    draft,
+    context: buildCompanionContext(currentState),
+  };
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const response = await fetch("/api/companion", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`companion_api_${response.status}`);
+    }
+
+    const data: unknown = await response.json();
+    const parsed = parseCompanionResponse(data, action, draft);
+
+    if (!parsed) {
+      throw new Error("invalid_companion_payload");
+    }
+
+    return parsed;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function createFallbackCompanionResult(action: CompanionAIAction, draft: string, currentState: DemoState): CompanionActionResult {
+  const intent = detectLocalCompanionIntent(draft);
+  const journeyPlan = createStructuredPlanMessage(draft, currentState);
+
+  if (action === "tasks") {
+    return {
+      source: "fallback",
+      content: "我把这句话整理成一张可以直接执行的旅程卡。",
+      structuredPlan: journeyPlan.structuredPlan,
+      tasks: createTasksFromDraft(draft),
+    };
+  }
+
+  if (action === "plan") {
+    return {
+      source: "fallback",
+      content: "我先把顺序排好，你照着走就能把主线讲清楚。",
+      structuredPlan: journeyPlan.structuredPlan,
+    };
+  }
+
+  if (action === "idea") {
+    return {
+      source: "fallback",
+      content: "我把这条目标收进旅程记忆卡了。",
+      note: {
+        title: draft.slice(0, 14),
+        body: `${draft}。把它整理成一条更清楚的专注旅程。`,
+      },
+      quoteRef: draft.slice(0, 28),
+    };
+  }
+
+  if (action === "message" && intent === "greeting") {
+    return {
+      source: "fallback",
+      content: "你好呀，我在这儿。你直接说一句今天想推进的事，我就陪你把它理顺。",
+    };
+  }
+
+  if (action === "message" && intent === "capability") {
+    return {
+      source: "fallback",
+      content: "我可以帮你拆成 3 步、判断先专注还是先领奖，也可以把奖励和探索顺成一条主线。你直接说一句现在最想推进的事就行。",
+    };
+  }
+
+  if (action === "message" && intent === "gratitude") {
+    return {
+      source: "fallback",
+      content: "好呀，需要的时候再叫我。我会继续陪你把后面的节奏走顺。",
+    };
+  }
+
+  if (action === "message" && !shouldGenerateStructuredReply(draft)) {
+    return {
+      source: "fallback",
+      content: createReplyFromDraft(draft),
+    };
+  }
+
+  return {
+    source: "fallback",
+    content: "我先把这句话拆成一条可以直接走的旅程。",
+    structuredPlan: journeyPlan.structuredPlan,
+  };
+}
+
 
 function createTasksFromDraft(draft: string): string[] {
   if (draft.includes("步数") || draft.includes("能量") || draft.includes("银行") || draft.includes("奖励")) {
@@ -267,6 +566,20 @@ function createPlanFromDraft(draft: string): string[] {
 }
 
 function createReplyFromDraft(draft: string): string {
+  const intent = detectLocalCompanionIntent(draft);
+
+  if (intent === "greeting") {
+    return "你好呀，我在这儿。你直接说一句今天想推进的事，我就陪你把它理顺。";
+  }
+
+  if (intent === "capability") {
+    return "我可以帮你拆顺序、判断先专注还是先领奖，也可以把奖励和探索接成一条主线。你直接说说现在最想推进什么就行。";
+  }
+
+  if (intent === "gratitude") {
+    return "好呀，需要的时候再叫我。我会继续陪你把后面的节奏走顺。";
+  }
+
   if (draft.includes("专注") || draft.includes("25") || draft.includes("番茄")) {
     return "可以，先把这一轮专注拿下。达标后我会提醒你先去奖励页领取步数能量。";
   }
@@ -283,7 +596,7 @@ function createReplyFromDraft(draft: string): string {
     return "那我会把探索排在奖励结算后面，这样地图推进会更像完成任务后的展开。";
   }
 
-  return "收到。我会先把它接进今天的主线：定任务、做一轮专注、领取奖励，再决定继续探索还是照顾宠物。";
+  return "我听到了。你可以继续多说一点你现在卡在哪，我会顺着你的话帮你理一理。";
 }
 
 function shouldRefreshCompanionContent(savedState: DemoState): boolean {
@@ -347,6 +660,8 @@ function loadState(): DemoState {
 export function useDemoState() {
   const [state, setState] = useState<DemoState>(loadState);
   const [now, setNow] = useState<number>(Date.now());
+  const [companionLoading, setCompanionLoading] = useState(false);
+  const [aiErrorMode, setAiErrorMode] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -368,6 +683,162 @@ export function useDemoState() {
     () => state.sessions.filter((item) => item.status === "completed").reduce((sum, item) => sum + item.duration, 0),
     [state.sessions],
   );
+
+  function applyCompanionActionResult(
+    current: DemoState,
+    action: CompanionAIAction,
+    draft: string,
+    result: CompanionActionResult,
+    options: {
+      addUserMessage: boolean;
+      clearDraft: boolean;
+      presetId: string;
+      fallbackNotice?: boolean;
+    },
+  ): DemoState {
+    const createdAt = Date.now();
+    const nextMessages = [...current.messages];
+
+    if (options.fallbackNotice) {
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "systemEvent",
+        content: FALLBACK_NOTICE,
+        createdAt,
+      });
+    }
+
+    if (options.addUserMessage) {
+      nextMessages.push({
+        id: createId("msg"),
+        role: "user",
+        type: "text",
+        content: draft,
+        createdAt,
+      });
+    }
+
+    let nextTasks = current.tasks;
+    let nextNotes = current.notes;
+    let nextFocus = current.focus;
+    const cardsToUpsert: AICard[] = [];
+
+    if (result.structuredPlan) {
+      cardsToUpsert.push(createJourneyPlanCard(result.structuredPlan));
+    }
+
+    if (action === "idea" && result.note && result.quoteRef) {
+      nextNotes = [{ id: createId("note"), title: result.note.title, body: result.note.body }, ...current.notes];
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "imageCard",
+        content: result.content,
+        createdAt,
+        quoteRef: result.quoteRef,
+      });
+    } else if (action === "tasks" && result.structuredPlan && result.tasks) {
+      const taskIds: string[] = [];
+      const createdTasks: TaskItem[] = result.tasks.map((title) => {
+        const id = createId("task");
+        taskIds.push(id);
+        return { id, title, status: "todo", linkedFocusPresetId: options.presetId };
+      });
+
+      nextTasks = [...createdTasks, ...current.tasks];
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "structuredPlan",
+        content: result.content,
+        createdAt,
+        structuredPlan: result.structuredPlan,
+      });
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "taskCard",
+        content: "我把这句话拆成了今天最顺手的 3 个动作。",
+        createdAt,
+        relatedTaskIds: taskIds,
+      });
+    } else if (result.structuredPlan) {
+      if (action === "plan") {
+        nextFocus = { ...current.focus, source: "ai" };
+      }
+
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "structuredPlan",
+        content: result.content,
+        createdAt,
+        structuredPlan: result.structuredPlan,
+      });
+    } else {
+      nextMessages.push({
+        id: createId("msg"),
+        role: "pet",
+        type: "text",
+        content: result.content,
+        createdAt,
+      });
+    }
+
+    return finalizeState({
+      ...current,
+      route: "companion",
+      draft: options.clearDraft ? "" : current.draft,
+      focus: nextFocus,
+      tasks: nextTasks,
+      notes: nextNotes,
+      messages: nextMessages,
+    }, cardsToUpsert);
+  }
+
+  async function performCompanionAction(
+    action: CompanionAIAction,
+    options: {
+      draft: string;
+      addUserMessage: boolean;
+      clearDraft: boolean;
+    },
+  ): Promise<void> {
+    if (companionLoading) return;
+
+    const draft = options.draft.trim();
+    if (!draft) return;
+
+    const snapshot = state;
+    const presetId = getPresetMeta(snapshot, snapshot.focus.selectedPresetId).id;
+    setCompanionLoading(true);
+    setAiErrorMode(false);
+
+    try {
+      const modelResult = await requestCompanionModel(action, draft, snapshot);
+      setState((current) =>
+        applyCompanionActionResult(current, action, draft, modelResult, {
+          addUserMessage: options.addUserMessage,
+          clearDraft: options.clearDraft,
+          presetId,
+        }),
+      );
+    } catch {
+      const fallbackResult = createFallbackCompanionResult(action, draft, snapshot);
+      setAiErrorMode(true);
+      setState((current) =>
+        applyCompanionActionResult(current, action, draft, fallbackResult, {
+          addUserMessage: options.addUserMessage,
+          clearDraft: options.clearDraft,
+          presetId,
+          fallbackNotice: true,
+        }),
+      );
+    } finally {
+      setCompanionLoading(false);
+    }
+  }
 
   function finalizeState(nextState: DemoState, cardsToUpsert: AICard[] = []): DemoState {
     let mergedCards = nextState.aiCards;
@@ -472,14 +943,10 @@ export function useDemoState() {
   }
 
   function generateJourneyPlan(): void {
-    setState((current) => {
-      const nextDraft = current.draft.trim() || "我今天有点乱，先帮我决定从哪开始";
-      const journeyPlan = createStructuredPlanMessage(nextDraft, current);
-
-      return finalizeState({
-        ...current,
-        draft: nextDraft,
-      }, [journeyPlan.card]);
+    void performCompanionAction("plan", {
+      draft: state.draft.trim() || DEFAULT_COMPANION_DRAFT,
+      addUserMessage: false,
+      clearDraft: false,
     });
   }
 
@@ -606,94 +1073,21 @@ export function useDemoState() {
   function runAiAction(action: "tasks" | "plan" | "idea"): void {
     const draft = state.draft.trim();
     if (!draft) return;
-
-    if (action === "tasks") {
-      const taskIds: string[] = [];
-      const nextTasks: TaskItem[] = createTasksFromDraft(draft).map((title) => {
-        const id = createId("task");
-        taskIds.push(id);
-        return { id, title, status: "todo", linkedFocusPresetId: selectedPreset.id };
-      });
-      const journeyPlan = createStructuredPlanMessage(draft, state);
-
-      setState((current) => finalizeState({
-        ...current,
-        route: "companion",
-        tasks: [...nextTasks, ...current.tasks],
-        messages: [
-          ...current.messages,
-          { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-          {
-            id: createId("msg"),
-            role: "pet",
-            type: "structuredPlan",
-            content: "我把这句话整理成一张可以直接执行的旅程卡。",
-            createdAt: Date.now(),
-            structuredPlan: journeyPlan.structuredPlan,
-          },
-          { id: createId("msg"), role: "pet", type: "taskCard", content: "我把这句话拆成了今天最顺手的 3 个动作。", createdAt: Date.now(), relatedTaskIds: taskIds },
-        ],
-      }, [journeyPlan.card]));
-      return;
-    }
-
-    if (action === "plan") {
-      const journeyPlan = createStructuredPlanMessage(draft, state);
-
-      setState((current) => finalizeState({
-        ...current,
-        route: "companion",
-        focus: { ...current.focus, source: "ai" },
-        messages: [
-          ...current.messages,
-          { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-          {
-            id: createId("msg"),
-            role: "pet",
-            type: "structuredPlan",
-            content: "我先把顺序排好，你照着走就能把主线讲清楚。",
-            createdAt: Date.now(),
-            structuredPlan: journeyPlan.structuredPlan,
-          },
-        ],
-      }, [journeyPlan.card]));
-      return;
-    }
-
-    setState((current) => finalizeState({
-      ...current,
-      route: "companion",
-      notes: [{ id: createId("note"), title: draft.slice(0, 14), body: `${draft}。把它整理成一条更清楚的专注旅程。` }, ...current.notes],
-      messages: [
-        ...current.messages,
-        { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-        { id: createId("msg"), role: "pet", type: "imageCard", content: "我把这条目标收进旅程记忆卡了。", createdAt: Date.now(), quoteRef: draft.slice(0, 28) },
-      ],
-    }));
+    void performCompanionAction(action, {
+      draft,
+      addUserMessage: true,
+      clearDraft: false,
+    });
   }
 
   function sendDraftMessage(): void {
     const draft = state.draft.trim();
     if (!draft) return;
-    const journeyPlan = createStructuredPlanMessage(draft, state);
-
-    setState((current) => finalizeState({
-      ...current,
-      route: "companion",
-      draft: "",
-      messages: [
-        ...current.messages,
-        { id: createId("msg"), role: "user", type: "text", content: draft, createdAt: Date.now() },
-        {
-          id: createId("msg"),
-          role: "pet",
-          type: "structuredPlan",
-          content: "我先把这句话拆成一条可以直接走的旅程。",
-          createdAt: Date.now(),
-          structuredPlan: journeyPlan.structuredPlan,
-        },
-      ],
-    }, [journeyPlan.card]));
+    void performCompanionAction("message", {
+      draft,
+      addUserMessage: true,
+      clearDraft: true,
+    });
   }
 
   function askPetForAdvice(): void {
@@ -717,6 +1111,7 @@ export function useDemoState() {
   }
 
   function clearMessages(): void {
+    setAiErrorMode(false);
     setState((current) => {
       if (current.messages.length === 0) return current;
       return finalizeState({
@@ -960,6 +1355,8 @@ export function useDemoState() {
     selectedPreset,
     completedMinutes,
     generateJourneyPlan,
+    companionLoading,
+    aiErrorMode,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward: canClaimCurrentFocusReward,

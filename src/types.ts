@@ -15,6 +15,7 @@ export type MessageType = "text" | "taskCard" | "focusPlan" | "reward" | "recap"
 export type TaskStatus = "todo" | "done";
 export type Rarity = "N" | "R" | "SR";
 export type AICardType = "journeyPlan" | "focusRecap" | "resourceAdvice" | "contextHint";
+export type CompanionAIAction = "message" | "tasks" | "plan" | "idea";
 
 export interface Wallet {
   crystal: number;
@@ -127,6 +128,38 @@ export interface AICard {
   secondaryLabel?: string;
   secondaryRoute?: RouteKey;
   steps?: string[];
+}
+
+export interface CompanionAIContext {
+  recentMessages: Array<Pick<CompanionMessage, "role" | "type" | "content">>;
+  focus: {
+    running: boolean;
+    mode: FocusMode;
+    durationMinutes: number;
+    elapsedSeconds: number;
+  };
+  claimableEnergy: number;
+  wallet: Wallet;
+  activePet: Pick<Pet, "id" | "name" | "mood" | "affection" | "level" | "activeSkin">;
+  openTasksCount: number;
+}
+
+export interface CompanionAIRequest {
+  action: CompanionAIAction;
+  draft: string;
+  context: CompanionAIContext;
+}
+
+export interface CompanionAIResponse {
+  content: string;
+  structuredPlan?: StructuredPlan;
+  tasks?: string[];
+  note?: {
+    title: string;
+    body: string;
+  };
+  quoteRef?: string;
+  source: "model";
 }
 
 export interface BattleState {

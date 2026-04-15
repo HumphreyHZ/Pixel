@@ -162,9 +162,9 @@ function BankRow({ item, onRedeem }: { item: StepLedger; onRedeem: (stepId: stri
   );
 }
 
-function PromptChip({ label, onClick }: { label: string; onClick: () => void }) {
+function PromptChip({ label, onClick, disabled = false }: { label: string; onClick: () => void; disabled?: boolean }) {
   return (
-    <button type="button" className="route-pill text-left" onClick={onClick}>
+    <button type="button" className="route-pill text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={disabled} onClick={onClick}>
       {label}
     </button>
   );
@@ -223,10 +223,12 @@ function AiModule({
 }
 
 function StructuredPlanMessage({
+  content,
   plan,
   onPrimary,
   onSecondary,
 }: {
+  content: string;
   plan: StructuredPlan;
   onPrimary: () => void;
   onSecondary: () => void;
@@ -237,6 +239,7 @@ function StructuredPlanMessage({
         <p className="ai-eyebrow">陪伴整理</p>
         <span className="story-chip">{plan.recommendedDuration}</span>
       </div>
+      <p className="mt-3 text-sm leading-6 text-ink">{content}</p>
       <div className="mt-4 space-y-4">
         <div>
           <p className="ai-mini-title">你现在要推进的是</p>
@@ -291,6 +294,8 @@ export default function App() {
     selectedPreset,
     completedMinutes,
     generateJourneyPlan,
+    companionLoading,
+    aiErrorMode,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward,
@@ -808,20 +813,31 @@ export default function App() {
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2.5">
                   {companionPrompts.map((prompt) => (
-                    <PromptChip key={prompt.label} label={prompt.label} onClick={() => setDraft(prompt.value)} />
+                    <PromptChip key={prompt.label} label={prompt.label} disabled={companionLoading} onClick={() => setDraft(prompt.value)} />
                   ))}
                 </div>
                 <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft} onClick={() => runAiAction("tasks")}>
+                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("tasks")}>
                     拆出待办
                   </button>
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft} onClick={() => runAiAction("plan")}>
+                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("plan")}>
                     安排顺序
                   </button>
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft} onClick={() => runAiAction("idea")}>
+                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("idea")}>
                     收进灵感
                   </button>
                 </div>
+                {companionLoading ? (
+                  <div className="note-strip mt-4">
+                    <p className="text-sm font-semibold text-ink">陪伴正在整理中。</p>
+                    <p className="mt-2 text-sm leading-6 text-mist">我会先把这句话理成顺手的下一步，再把结果接回当前主线。</p>
+                  </div>
+                ) : aiErrorMode ? (
+                  <div className="note-strip mt-4">
+                    <p className="text-sm font-semibold text-ink">当前已切回演示整理模式。</p>
+                    <p className="mt-2 text-sm leading-6 text-mist">真实模型暂时没接通，但你仍然可以继续测试这条专注、奖励和探索的闭环。</p>
+                  </div>
+                ) : null}
               </section>
               <section className="section-slab">
                 <SectionTitle
@@ -832,7 +848,7 @@ export default function App() {
                     <button
                       type="button"
                       className="story-button-secondary w-auto px-4 py-2.5 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={recentMessages.length === 0}
+                      disabled={recentMessages.length === 0 || companionLoading}
                       onClick={clearMessages}
                     >
                       清除记录
@@ -847,6 +863,7 @@ export default function App() {
                         <div className={`message-card ${messageTone(message.type, message.role)}`}>
                           {message.type === "structuredPlan" && message.structuredPlan ? (
                             <StructuredPlanMessage
+                              content={message.content}
                               plan={message.structuredPlan}
                               onPrimary={() => goToRouteOrStart(message.structuredPlan?.nextRoute)}
                               onSecondary={generateJourneyPlan}
@@ -885,10 +902,11 @@ export default function App() {
                   id="companion-draft"
                   aria-label="输入今天想推进的目标"
                   className="min-h-32 w-full rounded-[28px] border border-black/[0.06] bg-white/82 px-4 py-4 text-sm leading-6 text-ink placeholder:text-mist"
+                  disabled={companionLoading}
                   value={state.draft}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (event.key === "Enter" && !event.shiftKey && !companionLoading) {
                       event.preventDefault();
                       sendDraftMessage();
                     }
@@ -897,8 +915,8 @@ export default function App() {
                 />
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <p className="text-xs text-mist">回车发送，Shift + Enter 换行</p>
-                  <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft} onClick={sendDraftMessage}>
-                    让陪伴帮我整理
+                  <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft || companionLoading} onClick={sendDraftMessage}>
+                    {companionLoading ? "陪伴整理中..." : "让陪伴帮我整理"}
                   </button>
                 </div>
               </section>

@@ -3,6 +3,13 @@ import { seedState } from "../data/seed";
 import type {
   AICard,
   Achievement,
+  AgentObservedSnapshot,
+  AgentSessionState,
+  AgentStatus,
+  AgentToolCall,
+  AgentToolName,
+  AgentTrace,
+  AgentTraceStatus,
   CompanionAIAction,
   CompanionAIContext,
   CompanionAIRequest,
@@ -26,10 +33,20 @@ const LEGACY_COMPANION_KEYWORDS = [
 const DEFAULT_COMPANION_DRAFT = "我今天有点乱，先帮我决定从哪开始";
 const FALLBACK_NOTICE = "真实整理暂时没有接通，已切回演示整理模式，你仍然可以继续推进主线。";
 const ALLOWED_MODEL_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explore", "bank", "achievements", "battle", "shop"];
+const AUTO_AGENT_ROUTES: RouteKey[] = ["companion", "bank", "focus", "explore", "pets"];
+const AGENT_TRACE_LIMIT = 6;
 
 type CompanionActionResult = Omit<CompanionAIResponse, "source"> & { source: "model" | "fallback" };
 
 type LocalCompanionIntent = "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "general";
+
+type AgentToolDispatchResult = {
+  nextState: DemoState;
+  trace: AgentTrace;
+  pendingAction?: AgentSessionState["pendingAction"];
+  createdTaskIds?: string[];
+  createdIdeaQuote?: string;
+};
 
 function getPresetMeta(currentState: DemoState, presetId: string) {
   return currentState.presets.find((preset) => preset.id === presetId) ?? currentState.presets[0];
@@ -37,6 +54,43 @@ function getPresetMeta(currentState: DemoState, presetId: string) {
 
 function createId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createAgentTrace(message: string, status: AgentTraceStatus, createdAt = Date.now()): AgentTrace {
+  return {
+    id: createId("agent"),
+    message,
+    status,
+    createdAt,
+  };
+}
+
+function pushAgentTrace(traces: AgentTrace[], trace: AgentTrace): AgentTrace[] {
+  return [trace, ...traces].slice(0, AGENT_TRACE_LIMIT);
+}
+
+function createAgentSnapshot(currentState: DemoState): AgentObservedSnapshot {
+  const claimableEnergy = currentState.steps.filter((item) => !item.redeemed).reduce((sum, item) => sum + item.energyEarned, 0);
+  return {
+    route: currentState.route,
+    focusRunning: currentState.focus.running,
+    claimableEnergy,
+    crystal: currentState.wallet.crystal,
+    energy: currentState.wallet.energy,
+    activePetId: currentState.selectedPetId,
+    openTasksCount: currentState.tasks.filter((task) => task.status !== "done").length,
+  };
+}
+
+function normalizeAgentState(currentState: DemoState, nextAgent?: Partial<AgentSessionState>): AgentSessionState {
+  return {
+    agentStatus: nextAgent?.agentStatus ?? currentState.agent?.agentStatus ?? "idle",
+    activeGoal: nextAgent?.activeGoal ?? currentState.agent?.activeGoal ?? null,
+    activePlan: nextAgent?.activePlan ?? currentState.agent?.activePlan ?? null,
+    pendingAction: nextAgent?.pendingAction ?? currentState.agent?.pendingAction ?? null,
+    agentTrace: nextAgent?.agentTrace ?? currentState.agent?.agentTrace ?? [],
+    lastObservedSnapshot: nextAgent?.lastObservedSnapshot ?? currentState.agent?.lastObservedSnapshot ?? null,
+  };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -51,6 +105,10 @@ function normalizePets(pets: Pet[], selectedPetId?: string): Pet[] {
 
 function getActivePetFromState(currentState: Pick<DemoState, "pets" | "selectedPetId">): Pet {
   return currentState.pets.find((pet) => pet.id === currentState.selectedPetId) ?? currentState.pets[0];
+}
+
+function isAppFlowDraft(draft: string): boolean {
+  return /(专注|奖励|能量|步数|晶石|探索|宠物|图鉴|喂食|地图|银行|对战|商店|陪伴)/u.test(draft);
 }
 
 function createBattleIntroLog(petName: string): string {
@@ -110,6 +168,18 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
       nextRoute: "focus",
       nextAction: "先把第一轮拿下",
       why: "先让专注和奖励出现，再让宠物与探索接进来，闭环会更可信。",
+    };
+  }
+
+  if (!isAppFlowDraft(normalizedDraft) && /(拆成\s*[3三]步|分成\s*[3三]步|列出\s*[3三]步|三个步骤|三步来拆|越顺手越好)/u.test(normalizedDraft)) {
+    const steps = createTasksFromDraft(normalizedDraft);
+    return {
+      goalSummary: "把这件事拆成三个顺手步骤，让过程更轻松",
+      steps,
+      recommendedDuration: "照着三步慢慢来",
+      nextRoute: "companion",
+      nextAction: steps[0],
+      why: "先把事情拆小，再一个动作一个动作地做，会更容易开始，也不容易乱掉。",
     };
   }
 
@@ -299,6 +369,63 @@ function detectLocalCompanionIntent(draft: string): LocalCompanionIntent {
   return "general";
 }
 
+function isLowSignalCompanionDraft(draft: string): boolean {
+  const normalized = draft.trim();
+  return /^(嗯|嗯嗯|好的|好呀|行|可以|收到|明白|ok|okay|好的呀|好耶)[!！。.？? ]*$/iu.test(normalized);
+}
+
+function detectFollowUpCompanionAction(draft: string): CompanionAIAction | null {
+  const normalized = draft.trim();
+
+  if (/^(拆吧|拆一下|拆成\s*[3三]\s*步|拆给我看|帮我拆|继续拆)/u.test(normalized)) {
+    return "tasks";
+  }
+
+  if (/^(排一下|安排一下|顺一下|理一下|讲清楚|继续整理|整理一下|继续顺一顺)/u.test(normalized)) {
+    return "plan";
+  }
+
+  if (/^(记一下|收起来|收进灵感|记成灵感|存一下)/u.test(normalized)) {
+    return "idea";
+  }
+
+  return null;
+}
+
+function detectExplicitCompanionAction(draft: string): CompanionAIAction | null {
+  const normalized = draft.trim();
+
+  if (/(拆成\s*[3三]\s*步|分成\s*[3三]\s*步|列出\s*[3三]\s*步|三个步骤|三步来拆|拆出待办|拆成待办|待办清单)/u.test(normalized)) {
+    return "tasks";
+  }
+
+  if (/(安排顺序|排一下顺序|讲清主线|主线讲清楚|帮我规划|顺一下流程|整理成路线|把.*串起来)/u.test(normalized)) {
+    return "plan";
+  }
+
+  if (/(记成灵感|收进灵感|存成灵感|收起来做灵感|先记下来)/u.test(normalized)) {
+    return "idea";
+  }
+
+  return null;
+}
+
+function getLatestMeaningfulCompanionGoal(currentState: DemoState): string | null {
+  if (currentState.agent.activePlan?.goalSummary) {
+    return currentState.agent.activePlan.goalSummary;
+  }
+
+  if (currentState.agent.activeGoal && !isLowSignalCompanionDraft(currentState.agent.activeGoal)) {
+    return currentState.agent.activeGoal;
+  }
+
+  const recentUserMessage = [...currentState.messages]
+    .reverse()
+    .find((message) => message.role === "user" && !isLowSignalCompanionDraft(message.content));
+
+  return recentUserMessage?.content ?? null;
+}
+
 function shouldGenerateStructuredReply(draft: string): boolean {
   const normalized = draft.trim();
   const intent = detectLocalCompanionIntent(normalized);
@@ -320,6 +447,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isRouteKey(value: unknown): value is RouteKey {
   return typeof value === "string" && ALLOWED_MODEL_ROUTES.includes(value as RouteKey);
+}
+
+function isToolName(value: unknown): value is AgentToolName {
+  return typeof value === "string" && ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"].includes(value);
 }
 
 function parseStructuredPlan(value: unknown): StructuredPlan | null {
@@ -349,16 +480,114 @@ function parseStructuredPlan(value: unknown): StructuredPlan | null {
   };
 }
 
+function parseAgentToolCall(value: unknown): AgentToolCall | null {
+  if (!isRecord(value) || !isToolName(value.name) || typeof value.requiresConfirmation !== "boolean" || !isNonEmptyString(value.reason)) {
+    return null;
+  }
+
+  if (value.name === "noop") {
+    return {
+      name: value.name,
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  if (!isRecord(value.args)) {
+    return null;
+  }
+
+  if (value.name === "createTasks") {
+    const titles = Array.isArray(value.args.titles)
+      ? value.args.titles.filter((item): item is string => isNonEmptyString(item)).map((item) => item.trim()).slice(0, 3)
+      : [];
+
+    if (!titles.length) return null;
+
+    return {
+      name: value.name,
+      args: { titles },
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  if (value.name === "setRoute") {
+    if (!isRouteKey(value.args.route)) return null;
+    return {
+      name: value.name,
+      args: { route: value.args.route },
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  if (value.name === "startFocus") {
+    if (value.args.mode !== "pomodoro" && value.args.mode !== "countup") return null;
+    const duration = typeof value.args.duration === "number" && Number.isFinite(value.args.duration)
+      ? Math.max(5, Math.min(60, Math.round(value.args.duration)))
+      : undefined;
+    return {
+      name: value.name,
+      args: duration ? { mode: value.args.mode, duration } : { mode: value.args.mode },
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  if (value.name === "createIdea") {
+    if (!isNonEmptyString(value.args.title) || !isNonEmptyString(value.args.body)) return null;
+    return {
+      name: value.name,
+      args: {
+        title: value.args.title.trim().slice(0, 14),
+        body: value.args.body.trim(),
+        ...(isNonEmptyString(value.args.quoteRef) ? { quoteRef: value.args.quoteRef.trim().slice(0, 28) } : {}),
+      },
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  if (value.name === "selectPet") {
+    if (!isNonEmptyString(value.args.petId)) return null;
+    return {
+      name: value.name,
+      args: { petId: value.args.petId.trim() },
+      requiresConfirmation: value.requiresConfirmation,
+      reason: value.reason.trim(),
+    };
+  }
+
+  return {
+    name: value.name,
+    args: value.args.source === "steps" ? { source: "steps" } : {},
+    requiresConfirmation: value.requiresConfirmation,
+    reason: value.reason.trim(),
+  };
+}
+
+function parseAgentToolCalls(value: unknown): AgentToolCall[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const toolCalls = value
+    .map((item) => parseAgentToolCall(item))
+    .filter((item): item is AgentToolCall => item !== null)
+    .slice(0, 2);
+
+  return toolCalls.length ? toolCalls : undefined;
+}
+
 function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft: string): CompanionAIResponse | null {
   if (!isRecord(data) || data.source !== "model" || !isNonEmptyString(data.content)) {
     return null;
   }
 
-  const intent = detectLocalCompanionIntent(draft);
   const structuredPlan = data.structuredPlan ? parseStructuredPlan(data.structuredPlan) : undefined;
+  const toolCalls = parseAgentToolCalls(data.toolCalls);
   const baseResponse: CompanionAIResponse = {
     content: data.content.trim(),
     source: "model",
+    toolCalls,
   };
 
   if (action === "idea") {
@@ -393,9 +622,16 @@ function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft:
       return null;
     }
 
+    const normalizedPlan = structuredPlan
+      ? {
+        ...structuredPlan,
+        nextRoute: !isAppFlowDraft(draft) && structuredPlan.nextRoute === "home" ? "companion" as const : structuredPlan.nextRoute,
+      }
+      : structuredPlan;
+
     return {
       ...baseResponse,
-      structuredPlan,
+      structuredPlan: normalizedPlan,
       tasks,
     };
   }
@@ -416,6 +652,7 @@ function buildCompanionContext(currentState: DemoState): CompanionAIContext {
       type: message.type,
       content: message.content,
     })),
+    route: currentState.route,
     focus: {
       running: currentState.focus.running,
       mode: currentState.focus.mode,
@@ -433,6 +670,11 @@ function buildCompanionContext(currentState: DemoState): CompanionAIContext {
       activeSkin: activePet.activeSkin,
     },
     openTasksCount: currentState.tasks.filter((task) => task.status !== "done").length,
+    agent: {
+      status: currentState.agent.agentStatus,
+      activeGoal: currentState.agent.activeGoal,
+      hasPendingAction: Boolean(currentState.agent.pendingAction),
+    },
   };
 }
 
@@ -550,6 +792,10 @@ function createTasksFromDraft(draft: string): string[] {
     return ["安排一轮专注给宠物加经验", "完成一次喂食或切换陪伴", "触发 1 次探索并记录掉落反馈"];
   }
 
+  if (/(洗澡|清洗|洗一洗|洗猫|洗狗)/u.test(draft) && /(猫|猫咪|猫猫|宠物)/u.test(draft)) {
+    return ["准备温水、毛巾和洗澡用品", "先安抚猫咪，再快速温和地完成清洗", "擦干吹干并观察猫咪状态"];
+  }
+
   return ["确定今天的专注主题", "完成一轮专注领取晶石", "把奖励带去奖励页或探索继续展开"];
 }
 
@@ -560,6 +806,10 @@ function createPlanFromDraft(draft: string): string[] {
 
   if (draft.includes("宠物") || draft.includes("探索") || draft.includes("图鉴")) {
     return ["15 分钟整理今日目标", "25 分钟专注提升宠物经验", "10 分钟探索并记录奖励"];
+  }
+
+  if (/(洗澡|清洗|洗一洗|洗猫|洗狗)/u.test(draft) && /(猫|猫咪|猫猫|宠物)/u.test(draft)) {
+    return ["5 分钟准备洗澡用品", "10 分钟温和地帮猫咪洗澡", "10 分钟擦干吹干并安抚它"];
   }
 
   return ["25 分钟主线专注", "5 分钟领取奖励", "10 分钟宠物互动与复盘"];
@@ -597,6 +847,134 @@ function createReplyFromDraft(draft: string): string {
   }
 
   return "我听到了。你可以继续多说一点你现在卡在哪，我会顺着你的话帮你理一理。";
+}
+
+function createIdeaFromDraft(draft: string): { title: string; body: string; quoteRef: string } {
+  const normalized = draft.replace(/\s+/gu, " ").trim();
+  const titleCandidate = normalized
+    .split(/[，。,！!？?\n]/u)
+    .map((part) => part.trim())
+    .find((part) => part.length > 0)
+    ?? normalized;
+  const title = titleCandidate.slice(0, 14) || normalized.slice(0, 14);
+
+  return {
+    title,
+    body: normalized,
+    quoteRef: normalized.slice(0, 28),
+  };
+}
+
+function inferAgentToolCalls(action: CompanionAIAction, draft: string, currentState: DemoState, result: CompanionActionResult): AgentToolCall[] {
+  if (action === "tasks") {
+    const titles = result.tasks ?? createTasksFromDraft(draft);
+    return [{
+      name: "createTasks",
+      args: { titles },
+      requiresConfirmation: false,
+      reason: "先把今天最顺手的动作拆出来，后面更容易继续推进。",
+    }];
+  }
+
+  if (action === "idea" && result.note) {
+    return [{
+      name: "createIdea",
+      args: {
+        title: result.note.title,
+        body: result.note.body,
+        ...(result.quoteRef ? { quoteRef: result.quoteRef } : {}),
+      },
+      requiresConfirmation: false,
+      reason: "先把这条想法收进灵感区，后面还可以继续往下接。",
+    }];
+  }
+
+  if (action === "plan" && result.structuredPlan) {
+    return [{
+      name: "setRoute",
+      args: { route: result.structuredPlan.nextRoute },
+      requiresConfirmation: !AUTO_AGENT_ROUTES.includes(result.structuredPlan.nextRoute),
+      reason: `已经替你排好顺序了，下一步更适合先去${result.structuredPlan.nextRoute === "focus" ? "专注页" : "对应页面"}。`,
+    }];
+  }
+
+  if (action !== "message" || !result.structuredPlan) {
+    return [];
+  }
+
+  if (/拆成|拆出|待办/u.test(draft)) {
+    return [{
+      name: "createTasks",
+      args: { titles: createTasksFromDraft(draft) },
+      requiresConfirmation: false,
+      reason: "你在让陪伴拆动作，我先把待办准备好。",
+    }];
+  }
+
+  if (/先做什么|从哪开始|下一步/u.test(draft)) {
+    if (result.structuredPlan.nextRoute === "focus" && !currentState.focus.running) {
+      return [{
+        name: "startFocus",
+        args: { mode: currentState.focus.mode, duration: currentState.focus.durationMinutes },
+        requiresConfirmation: true,
+        reason: "你现在更适合先拿下一轮专注，我可以替你把它起好。",
+      }];
+    }
+
+    return [{
+      name: "setRoute",
+      args: { route: result.structuredPlan.nextRoute },
+      requiresConfirmation: !AUTO_AGENT_ROUTES.includes(result.structuredPlan.nextRoute),
+      reason: "我可以先把你带到最顺的下一页。",
+    }];
+  }
+
+  if (detectLocalCompanionIntent(draft) === "reward" && currentState.steps.some((item) => !item.redeemed)) {
+    return [{
+      name: "claimRecommended",
+      args: { source: "steps" },
+      requiresConfirmation: true,
+      reason: "现在最值得先做的是去奖励页把待领能量接回来。",
+    }];
+  }
+
+  return [];
+}
+
+function normalizeAgentToolCalls(action: CompanionAIAction, draft: string, currentState: DemoState, result: CompanionActionResult): AgentToolCall[] {
+  const directToolCalls = result.toolCalls?.slice(0, 2) ?? [];
+  const inferredToolCalls = inferAgentToolCalls(action, draft, currentState, result).slice(0, 2);
+
+  if (directToolCalls.length > 0) {
+    if (action === "tasks" && !directToolCalls.some((toolCall) => toolCall.name === "createTasks")) {
+      return [...directToolCalls, ...inferredToolCalls.filter((toolCall) => toolCall.name === "createTasks")].slice(0, 2);
+    }
+
+    if (action === "idea" && !directToolCalls.some((toolCall) => toolCall.name === "createIdea")) {
+      return [...directToolCalls, ...inferredToolCalls.filter((toolCall) => toolCall.name === "createIdea")].slice(0, 2);
+    }
+
+    return directToolCalls;
+  }
+
+  return inferredToolCalls;
+}
+
+function shouldConfirmToolCall(toolCall: AgentToolCall): boolean {
+  if (toolCall.requiresConfirmation) {
+    return true;
+  }
+
+  if (toolCall.name === "startFocus" || toolCall.name === "claimRecommended") {
+    return true;
+  }
+
+  if (toolCall.name === "setRoute") {
+    const route = toolCall.args?.route;
+    return !isRouteKey(route) || !AUTO_AGENT_ROUTES.includes(route);
+  }
+
+  return false;
 }
 
 function shouldRefreshCompanionContent(savedState: DemoState): boolean {
@@ -639,6 +1017,7 @@ function loadState(): DemoState {
         logs: [createBattleIntroLog(activePet.name)],
       },
       aiCards: parsed.aiCards ?? seedState.aiCards,
+      agent: normalizeAgentState(seedState, parsed.agent ?? seedState.agent),
     };
 
     if (shouldRefreshCompanionContent(mergedState)) {
@@ -662,6 +1041,11 @@ export function useDemoState() {
   const [now, setNow] = useState<number>(Date.now());
   const [companionLoading, setCompanionLoading] = useState(false);
   const [aiErrorMode, setAiErrorMode] = useState(false);
+  const [companionThinking, setCompanionThinking] = useState<null | {
+    action: CompanionAIAction;
+    draft: string;
+    startedAt: number;
+  }>(null);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -684,6 +1068,209 @@ export function useDemoState() {
     [state.sessions],
   );
 
+  function createToolFollowUpTrace(toolCall: AgentToolCall, current: DemoState, createdTaskIds?: string[]): AgentTrace | null {
+    if (toolCall.name === "createTasks" && createdTaskIds?.length) {
+      return createAgentTrace("下一步已经留在待办里了，照着往下走就行。", "done");
+    }
+
+    if (toolCall.name === "setRoute" && isRouteKey(toolCall.args?.route)) {
+      const routeLabelMap: Record<RouteKey, string> = {
+        home: "主页",
+        focus: "专注页",
+        companion: "陪伴页",
+        pets: "宠物页",
+        explore: "探索页",
+        bank: "奖励页",
+        achievements: "成就页",
+        battle: "试炼页",
+        shop: "补给铺",
+      };
+      return createAgentTrace(`已经把你带到${routeLabelMap[toolCall.args.route]}了。`, "done");
+    }
+
+    if (toolCall.name === "startFocus") {
+      return createAgentTrace("这一轮已经启动了，奖励会在达标后接上。", "done");
+    }
+
+    if (toolCall.name === "createIdea") {
+      return createAgentTrace("灵感已经收进边栏，后面还可以继续展开。", "done");
+    }
+
+    if (toolCall.name === "selectPet") {
+      const nextPet = current.pets.find((pet) => pet.id === current.selectedPetId);
+      return nextPet ? createAgentTrace(`已切换成${nextPet.name}，后续建议会跟着变化。`, "done") : null;
+    }
+
+    if (toolCall.name === "claimRecommended") {
+      return createAgentTrace("先去奖励页把待领能量接回来，会更顺。", "done");
+    }
+
+    return null;
+  }
+
+  function runAgentToolCall(current: DemoState, toolCall: AgentToolCall, createdAt = Date.now(), skipConfirmation = false): AgentToolDispatchResult {
+    if (toolCall.name === "noop") {
+      return {
+        nextState: current,
+        trace: createAgentTrace("这一步先不自动推进，我继续陪你顺着聊。", "done", createdAt),
+      };
+    }
+
+    if (!skipConfirmation && shouldConfirmToolCall(toolCall)) {
+      return {
+        nextState: current,
+        trace: createAgentTrace(toolCall.reason, "pending", createdAt),
+        pendingAction: {
+          toolCall,
+          requestedAt: createdAt,
+        },
+      };
+    }
+
+    if (toolCall.name === "createTasks") {
+      const titles = Array.isArray(toolCall.args?.titles)
+        ? toolCall.args.titles.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()).slice(0, 3)
+        : [];
+      const existingTitles = new Set(current.tasks.map((task) => task.title.trim().toLowerCase()));
+      const nextTitles = titles.filter((title) => !existingTitles.has(title.toLowerCase()));
+
+      if (!nextTitles.length) {
+        return {
+          nextState: current,
+          trace: createAgentTrace("这些待办已经准备好了，我就不重复再添一遍。", "done", createdAt),
+        };
+      }
+
+      const createdTaskIds: string[] = [];
+      const createdTasks: TaskItem[] = nextTitles.map((title) => {
+        const id = createId("task");
+        createdTaskIds.push(id);
+        return {
+          id,
+          title,
+          status: "todo",
+          linkedFocusPresetId: current.focus.selectedPresetId,
+        };
+      });
+
+      return {
+        nextState: {
+          ...current,
+          tasks: [...createdTasks, ...current.tasks],
+        },
+        trace: createAgentTrace(`已帮你拆出 ${createdTasks.length} 条待办。`, "done", createdAt),
+        createdTaskIds,
+      };
+    }
+
+    if (toolCall.name === "setRoute") {
+      const route = toolCall.args?.route;
+      if (!isRouteKey(route)) {
+        return {
+          nextState: current,
+          trace: createAgentTrace("这一步没能接到明确页面，我先保留成文字建议。", "failed", createdAt),
+        };
+      }
+
+      return {
+        nextState: {
+          ...current,
+          route,
+        },
+        trace: createAgentTrace(`建议下一步先去${route === "focus" ? "专注页" : route === "bank" ? "奖励页" : route === "explore" ? "探索页" : route === "pets" ? "宠物页" : "陪伴页"}。`, "done", createdAt),
+      };
+    }
+
+    if (toolCall.name === "startFocus") {
+      const mode = toolCall.args?.mode === "countup" ? "countup" : "pomodoro";
+      const duration = typeof toolCall.args?.duration === "number" ? Math.max(5, Math.min(60, Math.round(toolCall.args.duration))) : current.focus.durationMinutes;
+
+      return {
+        nextState: {
+          ...current,
+          route: "focus",
+          focus: {
+            ...current.focus,
+            mode,
+            running: true,
+            startedAt: Date.now(),
+            durationMinutes: duration,
+            source: "ai",
+          },
+        },
+        trace: createAgentTrace(`已替你开始 ${duration} 分钟${mode === "countup" ? "正计时" : "专注"}。`, "done", createdAt),
+      };
+    }
+
+    if (toolCall.name === "createIdea") {
+      const title = typeof toolCall.args?.title === "string" ? toolCall.args.title.trim().slice(0, 14) : "";
+      const body = typeof toolCall.args?.body === "string" ? toolCall.args.body.trim() : "";
+      const quoteRef = typeof toolCall.args?.quoteRef === "string" ? toolCall.args.quoteRef.trim().slice(0, 28) : undefined;
+
+      if (!title || !body) {
+        return {
+          nextState: current,
+          trace: createAgentTrace("这条灵感还不够完整，我先保留成一句陪伴提醒。", "failed", createdAt),
+        };
+      }
+
+      const alreadyExists = current.notes.some((note) => note.title === title && note.body === body);
+      if (alreadyExists) {
+        return {
+          nextState: current,
+          trace: createAgentTrace("这条灵感已经收好啦，我不重复贴第二张。", "done", createdAt),
+          createdIdeaQuote: quoteRef,
+        };
+      }
+
+      return {
+        nextState: {
+          ...current,
+          notes: [{ id: createId("note"), title, body }, ...current.notes],
+        },
+        trace: createAgentTrace("已把这条想法收进灵感区。", "done", createdAt),
+        createdIdeaQuote: quoteRef ?? title,
+      };
+    }
+
+    if (toolCall.name === "selectPet") {
+      const petId = typeof toolCall.args?.petId === "string" ? toolCall.args.petId : "";
+      const nextPet = current.pets.find((pet) => pet.id === petId && pet.unlocked);
+
+      if (!nextPet) {
+        return {
+          nextState: current,
+          trace: createAgentTrace("这只陪伴还没准备好出场，我先不切换。", "failed", createdAt),
+        };
+      }
+
+      const nextPets = normalizePets(current.pets, petId);
+      return {
+        nextState: {
+          ...current,
+          selectedPetId: petId,
+          pets: nextPets,
+          battle: {
+            ...current.battle,
+            active: false,
+            enemyHp: current.battle.enemyMaxHp,
+            playerHp: current.battle.playerMaxHp,
+            logs: [createBattleIntroLog(nextPet.name)],
+          },
+        },
+        trace: createAgentTrace(`已切换到${nextPet.name}。`, "done", createdAt),
+      };
+    }
+
+    return {
+      nextState: {
+        ...current,
+        route: "bank",
+      },
+      trace: createAgentTrace("建议先去奖励页把待领能量接回来。", "done", createdAt),
+    };
+  }
+
   function applyCompanionActionResult(
     current: DemoState,
     action: CompanionAIAction,
@@ -692,12 +1279,22 @@ export function useDemoState() {
     options: {
       addUserMessage: boolean;
       clearDraft: boolean;
-      presetId: string;
+      userMessageContent?: string;
       fallbackNotice?: boolean;
     },
   ): DemoState {
     const createdAt = Date.now();
     const nextMessages = [...current.messages];
+    const shouldReplaceActiveGoal = Boolean(result.structuredPlan)
+      || !isLowSignalCompanionDraft(draft)
+      || detectLocalCompanionIntent(draft) !== "general";
+    let nextAgent = normalizeAgentState(current, {
+      activeGoal: shouldReplaceActiveGoal ? (result.structuredPlan?.goalSummary ?? draft) : current.agent.activeGoal,
+      activePlan: result.structuredPlan ?? current.agent.activePlan,
+      pendingAction: null,
+      agentStatus: "acting",
+      lastObservedSnapshot: createAgentSnapshot(current),
+    });
 
     if (options.fallbackNotice) {
       nextMessages.push({
@@ -706,6 +1303,7 @@ export function useDemoState() {
         type: "systemEvent",
         content: FALLBACK_NOTICE,
         createdAt,
+        aiSource: "fallback",
       });
     }
 
@@ -714,7 +1312,7 @@ export function useDemoState() {
         id: createId("msg"),
         role: "user",
         type: "text",
-        content: draft,
+        content: options.userMessageContent ?? draft,
         createdAt,
       });
     }
@@ -722,58 +1320,25 @@ export function useDemoState() {
     let nextTasks = current.tasks;
     let nextNotes = current.notes;
     let nextFocus = current.focus;
+    let nextRoute = "companion" as RouteKey;
     const cardsToUpsert: AICard[] = [];
+    const normalizedToolCalls = normalizeAgentToolCalls(action, draft, current, result);
 
     if (result.structuredPlan) {
       cardsToUpsert.push(createJourneyPlanCard(result.structuredPlan));
     }
 
-    if (action === "idea" && result.note && result.quoteRef) {
-      nextNotes = [{ id: createId("note"), title: result.note.title, body: result.note.body }, ...current.notes];
-      nextMessages.push({
-        id: createId("msg"),
-        role: "pet",
-        type: "imageCard",
-        content: result.content,
-        createdAt,
-        quoteRef: result.quoteRef,
-      });
-    } else if (action === "tasks" && result.structuredPlan && result.tasks) {
-      const taskIds: string[] = [];
-      const createdTasks: TaskItem[] = result.tasks.map((title) => {
-        const id = createId("task");
-        taskIds.push(id);
-        return { id, title, status: "todo", linkedFocusPresetId: options.presetId };
-      });
-
-      nextTasks = [...createdTasks, ...current.tasks];
-      nextMessages.push({
-        id: createId("msg"),
-        role: "pet",
-        type: "structuredPlan",
-        content: result.content,
-        createdAt,
-        structuredPlan: result.structuredPlan,
-      });
-      nextMessages.push({
-        id: createId("msg"),
-        role: "pet",
-        type: "taskCard",
-        content: "我把这句话拆成了今天最顺手的 3 个动作。",
-        createdAt,
-        relatedTaskIds: taskIds,
-      });
-    } else if (result.structuredPlan) {
+    if (result.structuredPlan) {
       if (action === "plan") {
         nextFocus = { ...current.focus, source: "ai" };
       }
-
       nextMessages.push({
         id: createId("msg"),
         role: "pet",
         type: "structuredPlan",
         content: result.content,
         createdAt,
+        aiSource: result.source,
         structuredPlan: result.structuredPlan,
       });
     } else {
@@ -783,17 +1348,61 @@ export function useDemoState() {
         type: "text",
         content: result.content,
         createdAt,
+        aiSource: result.source,
       });
     }
 
-    return finalizeState({
+    let workingState: DemoState = {
       ...current,
-      route: "companion",
+      route: nextRoute,
       draft: options.clearDraft ? "" : current.draft,
       focus: nextFocus,
       tasks: nextTasks,
       notes: nextNotes,
       messages: nextMessages,
+      agent: nextAgent,
+    };
+
+    for (const toolCall of normalizedToolCalls) {
+      const dispatch = runAgentToolCall(workingState, toolCall, createdAt);
+      workingState = dispatch.nextState;
+      nextAgent = normalizeAgentState(workingState, {
+        ...nextAgent,
+        agentTrace: pushAgentTrace(nextAgent.agentTrace, dispatch.trace),
+        pendingAction: dispatch.pendingAction ? { ...dispatch.pendingAction, source: result.source } : null,
+        agentStatus: dispatch.pendingAction ? "awaiting_confirmation" : "acting",
+        lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+      });
+
+      const followUpTrace = createToolFollowUpTrace(toolCall, dispatch.nextState, dispatch.createdTaskIds);
+      if (followUpTrace) {
+        nextAgent = normalizeAgentState(dispatch.nextState, {
+          ...nextAgent,
+          agentTrace: pushAgentTrace(nextAgent.agentTrace, followUpTrace),
+          lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+        });
+      }
+
+      if (dispatch.pendingAction) {
+        break;
+      }
+    }
+
+    workingState = {
+      ...workingState,
+      messages: nextMessages,
+      agent: normalizeAgentState(workingState, {
+        ...nextAgent,
+        activeGoal: shouldReplaceActiveGoal ? (result.structuredPlan?.goalSummary ?? draft) : nextAgent.activeGoal,
+        activePlan: result.structuredPlan ?? nextAgent.activePlan,
+        agentStatus: nextAgent.pendingAction ? "awaiting_confirmation" : "done",
+        lastObservedSnapshot: createAgentSnapshot(workingState),
+      }),
+    };
+
+    return finalizeState({
+      ...workingState,
+      route: workingState.route ?? "companion",
     }, cardsToUpsert);
   }
 
@@ -811,33 +1420,108 @@ export function useDemoState() {
     if (!draft) return;
 
     const snapshot = state;
-    const presetId = getPresetMeta(snapshot, snapshot.focus.selectedPresetId).id;
+    const resolvedRequest = resolveCompanionRequest(action, draft, snapshot);
     setCompanionLoading(true);
     setAiErrorMode(false);
+    setCompanionThinking({
+      action: resolvedRequest.action,
+      draft: resolvedRequest.userMessageContent,
+      startedAt: Date.now(),
+    });
+    setState((current) => {
+      const nextMessages = options.addUserMessage
+        ? [
+          ...current.messages,
+          {
+            id: createId("msg"),
+            role: "user" as const,
+            type: "text" as const,
+            content: resolvedRequest.userMessageContent,
+            createdAt: Date.now(),
+          },
+        ]
+        : current.messages;
+
+      return {
+        ...current,
+        draft: options.clearDraft ? "" : current.draft,
+        messages: nextMessages,
+        agent: normalizeAgentState(current, {
+          agentStatus: "thinking",
+          activeGoal: current.agent.activeGoal ?? resolvedRequest.requestDraft,
+          pendingAction: null,
+        }),
+      };
+    });
 
     try {
-      const modelResult = await requestCompanionModel(action, draft, snapshot);
+      const modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
       setState((current) =>
-        applyCompanionActionResult(current, action, draft, modelResult, {
-          addUserMessage: options.addUserMessage,
-          clearDraft: options.clearDraft,
-          presetId,
+        applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, modelResult, {
+          addUserMessage: false,
+          clearDraft: false,
+          userMessageContent: resolvedRequest.userMessageContent,
         }),
       );
     } catch {
-      const fallbackResult = createFallbackCompanionResult(action, draft, snapshot);
+      const fallbackResult = createFallbackCompanionResult(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
       setAiErrorMode(true);
       setState((current) =>
-        applyCompanionActionResult(current, action, draft, fallbackResult, {
-          addUserMessage: options.addUserMessage,
-          clearDraft: options.clearDraft,
-          presetId,
+        applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, fallbackResult, {
+          addUserMessage: false,
+          clearDraft: false,
+          userMessageContent: resolvedRequest.userMessageContent,
           fallbackNotice: true,
         }),
       );
     } finally {
       setCompanionLoading(false);
+      setCompanionThinking(null);
     }
+  }
+
+  function resolveCompanionRequest(
+    requestedAction: CompanionAIAction,
+    draft: string,
+    currentState: DemoState,
+  ): {
+    action: CompanionAIAction;
+    requestDraft: string;
+    userMessageContent: string;
+  } {
+    if (requestedAction !== "message") {
+      return {
+        action: requestedAction,
+        requestDraft: draft,
+        userMessageContent: draft,
+      };
+    }
+
+    const explicitAction = detectExplicitCompanionAction(draft);
+    if (explicitAction) {
+      return {
+        action: explicitAction,
+        requestDraft: draft,
+        userMessageContent: draft,
+      };
+    }
+
+    const followUpAction = detectFollowUpCompanionAction(draft);
+    const baseGoal = getLatestMeaningfulCompanionGoal(currentState);
+
+    if (!followUpAction || !baseGoal) {
+      return {
+        action: requestedAction,
+        requestDraft: draft,
+        userMessageContent: draft,
+      };
+    }
+
+    return {
+      action: followUpAction,
+      requestDraft: `${baseGoal}。用户刚刚补充：${draft}`,
+      userMessageContent: draft,
+    };
   }
 
   function finalizeState(nextState: DemoState, cardsToUpsert: AICard[] = []): DemoState {
@@ -1073,6 +1757,42 @@ export function useDemoState() {
   function runAiAction(action: "tasks" | "plan" | "idea"): void {
     const draft = state.draft.trim();
     if (!draft) return;
+
+    if (action === "idea") {
+      const createdAt = Date.now();
+      setAiErrorMode(false);
+      setState((current) => {
+        const currentDraft = current.draft.trim();
+        if (!currentDraft) return current;
+
+        const nextIdea = createIdeaFromDraft(currentDraft);
+        const dispatch = runAgentToolCall(
+          current,
+          {
+            name: "createIdea",
+            args: nextIdea,
+            requiresConfirmation: false,
+            reason: "先把这条想法放进灵感区，后面准备好了再继续展开。",
+          },
+          createdAt,
+          true,
+        );
+
+        return finalizeState({
+          ...dispatch.nextState,
+          draft: "",
+          agent: normalizeAgentState(dispatch.nextState, {
+            ...current.agent,
+            pendingAction: null,
+            agentStatus: "done",
+            agentTrace: pushAgentTrace(current.agent.agentTrace, dispatch.trace),
+            lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+          }),
+        });
+      });
+      return;
+    }
+
     void performCompanionAction(action, {
       draft,
       addUserMessage: true,
@@ -1083,10 +1803,76 @@ export function useDemoState() {
   function sendDraftMessage(): void {
     const draft = state.draft.trim();
     if (!draft) return;
-    void performCompanionAction("message", {
+    const explicitAction = detectExplicitCompanionAction(draft);
+    void performCompanionAction(explicitAction ?? "message", {
       draft,
       addUserMessage: true,
       clearDraft: true,
+    });
+  }
+
+  function confirmPendingAgentAction(): void {
+    setState((current) => {
+      const pendingAction = current.agent.pendingAction;
+      if (!pendingAction) return current;
+
+      const createdAt = Date.now();
+      const dispatch = runAgentToolCall(
+        {
+          ...current,
+          agent: normalizeAgentState(current, {
+            pendingAction: null,
+            agentStatus: "acting",
+          }),
+        },
+        {
+          ...pendingAction.toolCall,
+          requiresConfirmation: false,
+        },
+        createdAt,
+        true,
+      );
+
+      let nextMessages = dispatch.nextState.messages;
+      let nextAgent = normalizeAgentState(dispatch.nextState, {
+        activeGoal: current.agent.activeGoal,
+        activePlan: current.agent.activePlan,
+        pendingAction: null,
+        agentStatus: "done",
+        agentTrace: pushAgentTrace(current.agent.agentTrace, dispatch.trace),
+        lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+      });
+
+      const followUpTrace = createToolFollowUpTrace(pendingAction.toolCall, dispatch.nextState, dispatch.createdTaskIds);
+      if (followUpTrace) {
+        nextAgent = normalizeAgentState(dispatch.nextState, {
+          ...nextAgent,
+          agentTrace: pushAgentTrace(nextAgent.agentTrace, followUpTrace),
+          lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+        });
+      }
+
+      return finalizeState({
+        ...dispatch.nextState,
+        messages: nextMessages,
+        agent: nextAgent,
+      });
+    });
+  }
+
+  function skipPendingAgentAction(): void {
+    setState((current) => {
+      if (!current.agent.pendingAction) return current;
+
+      return finalizeState({
+        ...current,
+        agent: normalizeAgentState(current, {
+          pendingAction: null,
+          agentStatus: "done",
+          agentTrace: pushAgentTrace(current.agent.agentTrace, createAgentTrace("这一步先保留，继续陪你整理别的。", "skipped")),
+          lastObservedSnapshot: createAgentSnapshot(current),
+        }),
+      });
     });
   }
 
@@ -1113,10 +1899,104 @@ export function useDemoState() {
   function clearMessages(): void {
     setAiErrorMode(false);
     setState((current) => {
-      if (current.messages.length === 0) return current;
+      if (current.messages.length === 0 && current.agent.agentTrace.length === 0 && !current.agent.pendingAction) return current;
       return finalizeState({
         ...current,
         messages: [],
+        agent: normalizeAgentState(current, {
+          agentStatus: "idle",
+          activeGoal: null,
+          activePlan: null,
+          pendingAction: null,
+          agentTrace: [],
+          lastObservedSnapshot: null,
+        }),
+      });
+    });
+  }
+
+  function addPlanStepsToTasks(plan: StructuredPlan, source: "model" | "fallback" = "fallback"): void {
+    setState((current) => {
+      const createdAt = Date.now();
+      const dispatch = runAgentToolCall(current, {
+        name: "createTasks",
+        args: { titles: plan.steps },
+        requiresConfirmation: false,
+        reason: "先把这三个步骤放进待办里，照着往下做会更顺。",
+      }, createdAt, true);
+
+      let nextMessages = current.messages;
+      let nextAgent = normalizeAgentState(dispatch.nextState, {
+        ...current.agent,
+        activeGoal: plan.goalSummary,
+        activePlan: plan,
+        pendingAction: null,
+        agentStatus: "done",
+        agentTrace: pushAgentTrace(current.agent.agentTrace, dispatch.trace),
+        lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+      });
+
+      return finalizeState({
+        ...dispatch.nextState,
+        messages: nextMessages,
+        agent: nextAgent,
+      });
+    });
+  }
+
+  function removeTask(taskId: string): void {
+    setState((current) => {
+      if (!current.tasks.some((task) => task.id === taskId)) return current;
+      return finalizeState({
+        ...current,
+        tasks: current.tasks.filter((task) => task.id !== taskId),
+      });
+    });
+  }
+
+  function clearCompletedTasks(): void {
+    setState((current) => {
+      if (!current.tasks.some((task) => task.status === "done")) return current;
+      return finalizeState({
+        ...current,
+        tasks: current.tasks.filter((task) => task.status !== "done"),
+      });
+    });
+  }
+
+  function removeNote(noteId: string): void {
+    setState((current) => {
+      if (!current.notes.some((note) => note.id === noteId)) return current;
+      return finalizeState({
+        ...current,
+        notes: current.notes.filter((note) => note.id !== noteId),
+      });
+    });
+  }
+
+  function convertNoteToTasks(noteId: string): void {
+    setState((current) => {
+      const targetNote = current.notes.find((note) => note.id === noteId);
+      if (!targetNote) return current;
+
+      const titles = createTasksFromDraft(`${targetNote.title}。${targetNote.body}`);
+      const existingTitles = new Set(current.tasks.map((task) => task.title.trim().toLowerCase()));
+      const nextTitles = titles.filter((title) => !existingTitles.has(title.toLowerCase()));
+
+      if (!nextTitles.length) {
+        return current;
+      }
+
+      const createdTasks: TaskItem[] = nextTitles.map((title) => ({
+        id: createId("task"),
+        title,
+        status: "todo",
+        linkedFocusPresetId: current.focus.selectedPresetId,
+      }));
+
+      return finalizeState({
+        ...current,
+        tasks: [...createdTasks, ...current.tasks],
       });
     });
   }
@@ -1356,6 +2236,7 @@ export function useDemoState() {
     completedMinutes,
     generateJourneyPlan,
     companionLoading,
+    companionThinking,
     aiErrorMode,
     timerSeconds,
     focusElapsedSeconds,
@@ -1369,8 +2250,15 @@ export function useDemoState() {
     finishFocus,
     skipFocusForDemo,
     toggleTask,
+    removeTask,
+    clearCompletedTasks,
+    removeNote,
+    convertNoteToTasks,
+    addPlanStepsToTasks,
     runAiAction,
     sendDraftMessage,
+    confirmPendingAgentAction,
+    skipPendingAgentAction,
     clearMessages,
     askPetForAdvice,
     selectPet,

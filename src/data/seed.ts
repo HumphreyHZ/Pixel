@@ -129,6 +129,16 @@ export const seedState: DemoState = {
     playerMaxHp: 118,
     logs: ["系统派出了企鹅。你派出绵羊，准备进入演示战斗。"],
   },
+  agent: {
+    agentStatus: "idle",
+    activeGoal: null,
+    activePlan: null,
+    pendingAction: null,
+    agentTrace: [
+      { id: "agent-trace-1", message: "已帮你整理过一次主线，后面的动作会继续顺着这条旅程往前走。", status: "done", createdAt: Date.now() - 1000 * 60 * 8 },
+    ],
+    lastObservedSnapshot: null,
+  },
 };
 
 

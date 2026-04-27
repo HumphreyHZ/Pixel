@@ -16,6 +16,9 @@ export type TaskStatus = "todo" | "done";
 export type Rarity = "N" | "R" | "SR";
 export type AICardType = "journeyPlan" | "focusRecap" | "resourceAdvice" | "contextHint";
 export type CompanionAIAction = "message" | "tasks" | "plan" | "idea";
+export type AgentStatus = "idle" | "thinking" | "awaiting_confirmation" | "acting" | "done" | "blocked";
+export type AgentTraceStatus = "done" | "pending" | "skipped" | "failed";
+export type AgentToolName = "createTasks" | "setRoute" | "startFocus" | "createIdea" | "selectPet" | "claimRecommended" | "noop";
 
 export interface Wallet {
   crystal: number;
@@ -82,6 +85,7 @@ export interface CompanionMessage {
   type: MessageType;
   content: string;
   createdAt: number;
+  aiSource?: "model" | "fallback";
   relatedTaskIds?: string[];
   quoteRef?: string;
   structuredPlan?: StructuredPlan;
@@ -94,6 +98,45 @@ export interface StructuredPlan {
   nextRoute: RouteKey;
   nextAction: string;
   why: string;
+}
+
+export interface AgentToolCall {
+  name: AgentToolName;
+  args?: Record<string, unknown>;
+  requiresConfirmation: boolean;
+  reason: string;
+}
+
+export interface PendingAgentAction {
+  toolCall: AgentToolCall;
+  requestedAt: number;
+  source?: "model" | "fallback";
+}
+
+export interface AgentTrace {
+  id: string;
+  message: string;
+  status: AgentTraceStatus;
+  createdAt: number;
+}
+
+export interface AgentObservedSnapshot {
+  route: RouteKey;
+  focusRunning: boolean;
+  claimableEnergy: number;
+  crystal: number;
+  energy: number;
+  activePetId: string;
+  openTasksCount: number;
+}
+
+export interface AgentSessionState {
+  agentStatus: AgentStatus;
+  activeGoal: string | null;
+  activePlan: StructuredPlan | null;
+  pendingAction: PendingAgentAction | null;
+  agentTrace: AgentTrace[];
+  lastObservedSnapshot: AgentObservedSnapshot | null;
 }
 
 export interface StepLedger {
@@ -132,6 +175,7 @@ export interface AICard {
 
 export interface CompanionAIContext {
   recentMessages: Array<Pick<CompanionMessage, "role" | "type" | "content">>;
+  route: RouteKey;
   focus: {
     running: boolean;
     mode: FocusMode;
@@ -142,6 +186,11 @@ export interface CompanionAIContext {
   wallet: Wallet;
   activePet: Pick<Pet, "id" | "name" | "mood" | "affection" | "level" | "activeSkin">;
   openTasksCount: number;
+  agent: {
+    status: AgentStatus;
+    activeGoal: string | null;
+    hasPendingAction: boolean;
+  };
 }
 
 export interface CompanionAIRequest {
@@ -153,6 +202,7 @@ export interface CompanionAIRequest {
 export interface CompanionAIResponse {
   content: string;
   structuredPlan?: StructuredPlan;
+  toolCalls?: AgentToolCall[];
   tasks?: string[];
   note?: {
     title: string;
@@ -189,6 +239,7 @@ export interface DemoState {
   mapNodes: MapNode[];
   achievements: Achievement[];
   battle: BattleState;
+  agent: AgentSessionState;
 }
 
 

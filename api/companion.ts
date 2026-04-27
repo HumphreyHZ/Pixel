@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
+  AgentToolCall,
+  AgentToolName,
   CompanionAIAction,
   CompanionAIContext,
   CompanionAIRequest,
@@ -16,6 +18,7 @@ const DEFAULT_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-chat";
 const ALLOWED_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explore", "bank", "achievements", "battle", "shop"];
 const ALLOWED_MESSAGE_TYPES: MessageType[] = ["text", "taskCard", "focusPlan", "reward", "recap", "imageCard", "systemEvent", "structuredPlan"];
+const ALLOWED_TOOL_NAMES: AgentToolName[] = ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"];
 let localEnvCache: Record<string, string> | null = null;
 type DraftIntent = "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "distracted" | "general";
 
@@ -37,6 +40,10 @@ function isRouteKey(value: unknown): value is RouteKey {
 
 function isMessageType(value: unknown): value is MessageType {
   return typeof value === "string" && ALLOWED_MESSAGE_TYPES.includes(value as MessageType);
+}
+
+function isToolName(value: unknown): value is AgentToolName {
+  return typeof value === "string" && ALLOWED_TOOL_NAMES.includes(value as AgentToolName);
 }
 
 function parseStructuredPlan(value: unknown): StructuredPlan | null {
@@ -70,6 +77,7 @@ function parseContext(value: unknown): CompanionAIContext | null {
   if (!isRecord(value)) return null;
   if (
     !Array.isArray(value.recentMessages)
+    || !isRouteKey(value.route)
     || !isRecord(value.focus)
     || typeof value.focus.running !== "boolean"
     || (value.focus.mode !== "pomodoro" && value.focus.mode !== "countup")
@@ -87,6 +95,9 @@ function parseContext(value: unknown): CompanionAIContext | null {
     || typeof value.activePet.level !== "number"
     || !isNonEmptyString(value.activePet.activeSkin)
     || typeof value.openTasksCount !== "number"
+    || !isRecord(value.agent)
+    || typeof value.agent.hasPendingAction !== "boolean"
+    || !isNonEmptyString(value.agent.status)
   ) {
     return null;
   }
@@ -106,6 +117,7 @@ function parseContext(value: unknown): CompanionAIContext | null {
 
   return {
     recentMessages,
+    route: value.route,
     focus: {
       running: value.focus.running,
       mode: value.focus.mode,
@@ -126,7 +138,98 @@ function parseContext(value: unknown): CompanionAIContext | null {
       activeSkin: value.activePet.activeSkin.trim(),
     },
     openTasksCount: value.openTasksCount,
+    agent: {
+      status: value.agent.status as CompanionAIContext["agent"]["status"],
+      activeGoal: isNonEmptyString(value.agent.activeGoal) ? value.agent.activeGoal.trim() : null,
+      hasPendingAction: value.agent.hasPendingAction,
+    },
   };
+}
+
+function parseToolCallArgs(name: AgentToolName, args: unknown): Record<string, unknown> | undefined {
+  if (name === "noop") {
+    return undefined;
+  }
+
+  if (!isRecord(args)) {
+    return undefined;
+  }
+
+  if (name === "createTasks") {
+    const titles = Array.isArray(args.titles)
+      ? args.titles.filter((item): item is string => isNonEmptyString(item)).map((item) => item.trim()).slice(0, 3)
+      : [];
+    return titles.length ? { titles } : undefined;
+  }
+
+  if (name === "setRoute") {
+    return isRouteKey(args.route) ? { route: args.route } : undefined;
+  }
+
+  if (name === "startFocus") {
+    if (args.mode !== "pomodoro" && args.mode !== "countup") {
+      return undefined;
+    }
+
+    const duration = typeof args.duration === "number" && Number.isFinite(args.duration)
+      ? Math.max(5, Math.min(60, Math.round(args.duration)))
+      : undefined;
+
+    return duration ? { mode: args.mode, duration } : { mode: args.mode };
+  }
+
+  if (name === "createIdea") {
+    if (!isNonEmptyString(args.title) || !isNonEmptyString(args.body)) {
+      return undefined;
+    }
+
+    return {
+      title: args.title.trim().slice(0, 14),
+      body: args.body.trim(),
+      ...(isNonEmptyString(args.quoteRef) ? { quoteRef: args.quoteRef.trim().slice(0, 28) } : {}),
+    };
+  }
+
+  if (name === "selectPet") {
+    return isNonEmptyString(args.petId) ? { petId: args.petId.trim() } : undefined;
+  }
+
+  if (name === "claimRecommended") {
+    return args.source === "steps" ? { source: "steps" } : {};
+  }
+
+  return undefined;
+}
+
+function parseToolCall(value: unknown): AgentToolCall | null {
+  if (!isRecord(value) || !isToolName(value.name) || typeof value.requiresConfirmation !== "boolean" || !isNonEmptyString(value.reason)) {
+    return null;
+  }
+
+  const args = parseToolCallArgs(value.name, value.args);
+  if (value.name !== "noop" && !args) {
+    return null;
+  }
+
+  return {
+    name: value.name,
+    args,
+    requiresConfirmation: value.requiresConfirmation,
+    reason: value.reason.trim(),
+  };
+}
+
+function parseToolCalls(value: unknown): AgentToolCall[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const toolCalls = value
+    .map((item) => parseToolCall(item))
+    .filter((item): item is AgentToolCall => item !== null)
+    .slice(0, 2);
+
+  return toolCalls.length ? toolCalls : undefined;
 }
 
 function parseRequestBody(value: unknown): CompanionAIRequest | null {
@@ -158,6 +261,7 @@ function parseModelResult(value: unknown, action: CompanionAIAction): CompanionA
   const baseResult: CompanionAIResponse = {
     content: value.content.trim(),
     source: "model",
+    toolCalls: parseToolCalls(value.toolCalls),
   };
 
   if (action === "idea") {
@@ -359,12 +463,18 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
     "说话要像宠物在轻轻接住用户，而不是任务助手在下指令。",
     "不要反复使用同一种开场，比如“好呀，我们先…”。不同输入要有明显不同的回应方式。",
     "不要总以“今天想从哪里开始”或类似问题结尾。只有用户明确在问下一步时，才这样追问。",
+    "如果用户当前输入很短，比如“拆吧”“安排一下”“开始吧”“就按这个来”，优先把它理解成对 context.agent.activeGoal 或最近一条计划的跟进，而不是全新话题。",
+    "如果 context.agent.activeGoal 不为空，而用户当前输入只是简短确认或续接，请沿着这个目标继续往下推进。",
     "如果用户只是打招呼、表达情绪、提到自己有点乱、累、走神，先回应状态本身，不要立刻拉去专注。",
     "如果提到资源，优先说“把奖励接回来”或“去奖励页把能量领回来”。",
     "如果提到宠物，不要写“陪伴小羊”“陪伴宠物”这种生硬说法，要写成自然句子。",
     "避免使用“看到你回来了”“开始专注任务”“开启番茄钟”这种像模板或工具说明的说法。",
     "不要用“看到你…所以…”、“用户”、“任务助手”、“APP 功能”、“系统建议”这种机械或旁白式表达。",
     "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘、产品设计等打破产品语境的词。",
+    "你不只是聊天，也可以通过 toolCalls 建议工具动作，帮用户把下一步准备好或推进一步。",
+    "toolCalls 最多 2 个。只有真的能帮助用户推进当前目标时，才返回 toolCalls，不要为了显得像 Agent 而硬凑动作。",
+    "可用工具只有：createTasks、setRoute、startFocus、createIdea、selectPet、claimRecommended、noop。",
+    "低风险动作可以 requiresConfirmation=false；startFocus、claimRecommended，以及会明显打断当前流程的 setRoute 要 requiresConfirmation=true。",
     `nextRoute 只能从这些值里选择：${ALLOWED_ROUTES.join(", ")}。`,
     "如果返回 structuredPlan，steps 必须正好 3 条，每条都是清晰、可执行的中文短句。",
     "content 写 1 到 3 句中文，像宠物在温柔地接住用户并推动下一步。",
@@ -386,21 +496,20 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
   };
 
   const messageShape = isTaskOrientedIntent(intent)
-    ? `返回 JSON 结构：{"content":"..."} 或 {"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."}}。只有当用户明确在请求你整理主线、拆步骤、决定下一步时，才附带 structuredPlan。`
-    : `返回 JSON 结构：{"content":"..."}`; 
+    ? `返回 JSON 结构：{"content":"..."}，或 {"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}。只有当用户明确在请求你整理主线、拆步骤、决定下一步时，才附带 structuredPlan；只有当真的能推进一步时，才附带 toolCalls。`
+    : `返回 JSON 结构：{"content":"..."}，或 {"content":"...","toolCalls":[{"name":"setRoute","args":{"route":"companion"},"requiresConfirmation":false,"reason":"..."}]}。普通聊天以自然文本为主，不要为了表现像 Agent 而硬凑动作。`;
 
   const actionPromptMap: Record<CompanionAIAction, string> = {
     message: messageShape,
-    plan: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."}}`,
-    tasks: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"tasks":["...","...","..."]}`,
-    idea: `返回 JSON 结构：{"content":"...","note":{"title":"...","body":"..."},"quoteRef":"..."}`,
+    plan: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"toolCalls":[{"name":"setRoute","args":{"route":"focus"},"requiresConfirmation":false,"reason":"..."}]}`,
+    tasks: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"tasks":["...","...","..."],"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}`,
+    idea: `返回 JSON 结构：{"content":"...","note":{"title":"...","body":"..."},"quoteRef":"...","toolCalls":[{"name":"createIdea","args":{"title":"...","body":"...","quoteRef":"..."},"requiresConfirmation":false,"reason":"..."}]}`,
   };
 
   return [...basePrompt, intentPromptMap[intent], actionPromptMap[action]].join("\n");
 }
 
 async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIResponse> {
-  const intent = detectDraftIntent(payload.draft);
   const apiKey = await getConfigValue("DEEPSEEK_API_KEY");
   if (!apiKey) {
     throw new Error("missing_deepseek_api_key");

@@ -225,6 +225,48 @@
     box-shadow: 0 12px 24px rgba(20, 20, 20, 0.16);
   }
 
+  .companion-group {
+    @apply rounded-[24px] border border-black/[0.05] p-4;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(247, 241, 233, 0.88)),
+      rgba(250, 246, 240, 0.72);
+    box-shadow: 0 12px 24px rgba(28, 23, 18, 0.05);
+  }
+
+  .companion-group-title {
+    @apply text-[11px] font-bold uppercase tracking-[0.2em] text-mist;
+  }
+
+  .companion-action-grid {
+    @apply grid gap-2.5;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .companion-action-button {
+    @apply flex min-h-[94px] flex-col justify-between rounded-[22px] border border-black/[0.06] px-3.5 py-3 text-left text-ink;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(245, 239, 231, 0.9)),
+      rgba(255, 255, 255, 0.78);
+    box-shadow: 0 12px 24px rgba(28, 23, 18, 0.06);
+  }
+
+  .companion-action-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    border-color: rgba(28, 23, 18, 0.12);
+  }
+
+  .companion-action-button:disabled {
+    background: rgba(255, 255, 255, 0.5);
+  }
+
+  .companion-action-label {
+    @apply text-sm font-black tracking-[-0.02em] text-ink;
+  }
+
+  .companion-action-copy {
+    @apply mt-3 text-[11px] font-medium leading-5 text-mist;
+  }
+
   .note-strip {
     @apply rounded-[26px] border border-black/[0.05] p-4;
     background: rgba(255, 255, 255, 0.72);

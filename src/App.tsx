@@ -1,5 +1,6 @@
 ﻿import { useMemo } from "react";
 import type { ReactNode } from "react";
+import { useState } from "react";
 import { PixelPet } from "./components/PixelPet";
 import { mainRoutes, routeLabels } from "./data/seed";
 import { useDemoState } from "./hooks/useDemoState";
@@ -33,9 +34,9 @@ const shopItems = [
 const extendedDemoRoutes: RouteKey[] = ["pets", "shop", "battle", "achievements"];
 
 const companionPrompts = [
-  { label: "帮我拆成 3 步", value: "帮我把今天要推进的事拆成 3 步，越顺手越好。" },
-  { label: "我现在更适合专注还是休息", value: "我现在有点乱，帮我判断更适合先专注、先热身还是先休息整理。" },
-  { label: "把今天主线讲清楚", value: "把今天的主线讲清楚：专注、领奖、探索和陪伴之间应该怎么接。" },
+  { label: "拆成 3 步", value: "帮我把今天要推进的事拆成 3 步，越顺手越好。" },
+  { label: "先专注还是休息", value: "我现在有点乱，帮我判断更适合先专注、先热身还是先休息整理。" },
+  { label: "讲清今天主线", value: "把今天的主线讲清楚：专注、领奖、探索和陪伴之间应该怎么接。" },
 ] as const;
 
 const petRoleCopy: Record<string, string> = {
@@ -97,11 +98,19 @@ function ResourceBadge({ label, value }: { label: string; value: number }) {
   );
 }
 
-function TaskList({ tasks, onToggle }: { tasks: TaskItem[]; onToggle: (taskId: string) => void }) {
+function TaskList({
+  tasks,
+  onToggle,
+  onRemove,
+}: {
+  tasks: TaskItem[];
+  onToggle: (taskId: string) => void;
+  onRemove?: (taskId: string) => void;
+}) {
   return (
     <div className="space-y-2.5">
       {tasks.map((task) => (
-        <label key={task.id} className="flex items-center gap-3 rounded-[22px] border border-black/[0.05] bg-white/72 px-4 py-3 text-sm shadow-[0_10px_24px_rgba(28,23,18,0.05)]">
+        <div key={task.id} className="flex items-center gap-3 rounded-[22px] border border-black/[0.05] bg-white/72 px-4 py-3 text-sm shadow-[0_10px_24px_rgba(28,23,18,0.05)]">
           <input
             checked={task.status === "done"}
             onChange={() => onToggle(task.id)}
@@ -109,7 +118,16 @@ function TaskList({ tasks, onToggle }: { tasks: TaskItem[]; onToggle: (taskId: s
             className="h-4 w-4 rounded border-black/20 bg-white"
           />
           <span className={task.status === "done" ? "min-w-0 flex-1 text-mist line-through" : "min-w-0 flex-1 text-ink"}>{task.title}</span>
-        </label>
+          {onRemove ? (
+            <button
+              type="button"
+              className="shrink-0 rounded-full border border-black/[0.08] px-2.5 py-1 text-[11px] font-semibold tracking-[0.06em] text-mist transition hover:border-black/[0.14] hover:text-ink"
+              onClick={() => onRemove(task.id)}
+            >
+              清除
+            </button>
+          ) : null}
+        </div>
       ))}
     </div>
   );
@@ -162,10 +180,44 @@ function BankRow({ item, onRedeem }: { item: StepLedger; onRedeem: (stepId: stri
   );
 }
 
-function PromptChip({ label, onClick, disabled = false }: { label: string; onClick: () => void; disabled?: boolean }) {
+function PromptChip({
+  label,
+  onClick,
+  disabled = false,
+  selected = false,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  selected?: boolean;
+}) {
   return (
-    <button type="button" className="route-pill text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={disabled} onClick={onClick}>
+    <button
+      type="button"
+      className={`route-pill text-left disabled:cursor-not-allowed disabled:opacity-50 ${selected ? "route-pill-active" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
       {label}
+    </button>
+  );
+}
+
+function CompanionActionButton({
+  title,
+  description,
+  disabled = false,
+  onClick,
+}: {
+  title: string;
+  description: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className="companion-action-button" disabled={disabled} onClick={onClick}>
+      <span className="companion-action-label">{title}</span>
+      <span className="companion-action-copy">{description}</span>
     </button>
   );
 }
@@ -226,11 +278,13 @@ function StructuredPlanMessage({
   content,
   plan,
   onPrimary,
+  onAddToTasks,
   onSecondary,
 }: {
   content: string;
   plan: StructuredPlan;
   onPrimary: () => void;
+  onAddToTasks: () => void;
   onSecondary: () => void;
 }) {
   return (
@@ -265,12 +319,63 @@ function StructuredPlanMessage({
         <button type="button" className="story-button w-auto px-4 py-3" onClick={onPrimary}>
           按这个顺序去做
         </button>
+        <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onAddToTasks}>
+          加入待办
+        </button>
         <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onSecondary}>
           重新整理
         </button>
       </div>
     </div>
   );
+}
+
+function agentTraceStatusLabel(status: "done" | "pending" | "skipped" | "failed"): string {
+  if (status === "pending") return "待确认";
+  if (status === "skipped") return "已跳过";
+  if (status === "failed") return "未完成";
+  return "已完成";
+}
+
+function agentTraceStatusClass(status: "done" | "pending" | "skipped" | "failed"): string {
+  if (status === "pending") return "border-amber/45 bg-amber/22";
+  if (status === "skipped") return "border-black/[0.06] bg-black/[0.04]";
+  if (status === "failed") return "border-peach/50 bg-peach/26";
+  return "border-sage/50 bg-sage/24";
+}
+
+function aiSourceLabel(source?: "model" | "fallback"): string | null {
+  if (source === "model") return "DeepSeek";
+  if (source === "fallback") return "演示回退";
+  return null;
+}
+
+function companionThinkingCopy(action?: RouteKey | "message" | "tasks" | "plan" | "idea") {
+  if (action === "tasks") {
+    return {
+      title: "正在把这件事拆成顺手的三步",
+      steps: ["先抓住这件事的重点", "把动作拆成更容易开始的三步", "准备把结果接回待办和下一步"],
+    };
+  }
+
+  if (action === "plan") {
+    return {
+      title: "正在安排更顺的节奏",
+      steps: ["先判断这句话更像哪种目标", "再把顺序和下一步排清楚", "尽量让这条路线接回当前主线"],
+    };
+  }
+
+  if (action === "idea") {
+    return {
+      title: "正在把这条想法收成灵感",
+      steps: ["先提炼这句话里最值得留下的部分", "把它收成一条更清楚的灵感", "准备放进边栏方便后面继续展开"],
+    };
+  }
+
+  return {
+    title: "正在整理这句话",
+    steps: ["先理解你现在最想推进的事", "判断该直接回应、拆步骤，还是安排下一步", "把结果整理成更顺手的回复"],
+  };
 }
 
 function AchievementSeal({ title, description, unlocked, index, evidence }: { title: string; description: string; unlocked: boolean; index: number; evidence: string }) {
@@ -295,6 +400,7 @@ export default function App() {
     completedMinutes,
     generateJourneyPlan,
     companionLoading,
+    companionThinking,
     aiErrorMode,
     timerSeconds,
     focusElapsedSeconds,
@@ -308,8 +414,15 @@ export default function App() {
     finishFocus,
     skipFocusForDemo,
     toggleTask,
+    removeTask,
+    clearCompletedTasks,
+    removeNote,
+    convertNoteToTasks,
+    addPlanStepsToTasks,
     runAiAction,
     sendDraftMessage,
+    confirmPendingAgentAction,
+    skipPendingAgentAction,
     clearMessages,
     askPetForAdvice,
     selectPet,
@@ -321,10 +434,21 @@ export default function App() {
     battleAction,
     buyItem,
   } = useDemoState();
+  const [showAllNotes, setShowAllNotes] = useState(false);
 
   const openTasks = useMemo(() => state.tasks.filter((task) => task.status !== "done"), [state.tasks]);
+  const completedTasks = useMemo(() => state.tasks.filter((task) => task.status === "done"), [state.tasks]);
   const completedSessions = useMemo(() => state.sessions.filter((session) => session.status === "completed"), [state.sessions]);
-  const recentMessages = useMemo(() => state.messages.slice(-6), [state.messages]);
+  const recentMessages = useMemo(
+    () => state.messages.filter((message) => message.type !== "taskCard" && message.type !== "imageCard"),
+    [state.messages],
+  );
+  const recentAgentTrace = useMemo(() => state.agent.agentTrace.slice(0, 4), [state.agent.agentTrace]);
+  const visibleNotes = useMemo(
+    () => (showAllNotes ? state.notes : state.notes.slice(0, 2)),
+    [showAllNotes, state.notes],
+  );
+  const thinkingCopy = useMemo(() => companionThinkingCopy(companionThinking?.action), [companionThinking?.action]);
   const todayCrystal = useMemo(() => completedSessions.reduce((sum, item) => sum + item.crystalReward, 0), [completedSessions]);
   const activePetProgress = Math.min(100, (activePet.exp / (activePet.level * 12)) * 100);
   const claimableEnergy = useMemo(
@@ -336,6 +460,10 @@ export default function App() {
     [state.mapNodes, completedMinutes],
   );
   const hasDraft = state.draft.trim().length > 0;
+  const selectedPrompt = useMemo(
+    () => companionPrompts.find((prompt) => state.draft.trim() === prompt.value.trim()) ?? null,
+    [state.draft],
+  );
   const focusTargetSeconds = state.focus.durationMinutes * 60;
   const focusRemainingMinutes = Math.max(0, Math.ceil((focusTargetSeconds - focusElapsedSeconds) / 60));
   const focusProgress = focusTargetSeconds > 0 ? Math.min(100, (focusElapsedSeconds / focusTargetSeconds) * 100) : 0;
@@ -811,88 +939,172 @@ export default function App() {
                     <SectionTitle eyebrow="陪伴整理台" title="把一句模糊目标，拆成可走的下一步" caption="这里不是泛聊天，而是把目标整理成任务、顺序和建议时长。" />
                   </div>
                 </div>
-                <div className="mt-1 flex flex-wrap gap-2.5">
-                  {companionPrompts.map((prompt) => (
-                    <PromptChip key={prompt.label} label={prompt.label} disabled={companionLoading} onClick={() => setDraft(prompt.value)} />
-                  ))}
-                </div>
-                <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("tasks")}>
-                    拆出待办
-                  </button>
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("plan")}>
-                    安排顺序
-                  </button>
-                  <button type="button" className="route-pill disabled:cursor-not-allowed disabled:opacity-50" disabled={!hasDraft || companionLoading} onClick={() => runAiAction("idea")}>
-                    收进灵感
-                  </button>
-                </div>
-                {companionLoading ? (
-                  <div className="note-strip mt-4">
-                    <p className="text-sm font-semibold text-ink">陪伴正在整理中。</p>
-                    <p className="mt-2 text-sm leading-6 text-mist">我会先把这句话理成顺手的下一步，再把结果接回当前主线。</p>
+                <div className="companion-group mt-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="companion-group-title">不知道怎么开口</p>
+                      <p className="mt-1 text-xs leading-5 text-mist">先点一句，我会把它带进输入区，你也可以继续改。</p>
+                    </div>
+                    {selectedPrompt ? <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">已带入</span> : null}
                   </div>
-                ) : aiErrorMode ? (
+                  <div className="mt-3 flex flex-wrap gap-2.5">
+                    {companionPrompts.map((prompt) => (
+                      <PromptChip
+                        key={prompt.label}
+                        label={prompt.label}
+                        selected={selectedPrompt?.label === prompt.label}
+                        disabled={companionLoading}
+                        onClick={() => setDraft(prompt.value)}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="companion-group mt-4">
+                  <p className="companion-group-title">基于当前输入</p>
+                  <p className="mt-1 text-xs leading-5 text-mist">{hasDraft ? "这句会按你选的方式整理。" : "先写一句目标，再选怎么整理。"}</p>
+                  <div className="companion-action-grid mt-3">
+                    <CompanionActionButton
+                      title="拆成待办"
+                      description="把这句变成 3 个动作"
+                      disabled={!hasDraft || companionLoading}
+                      onClick={() => runAiAction("tasks")}
+                    />
+                    <CompanionActionButton
+                      title="排成顺序"
+                      description="把先后和下一步讲清楚"
+                      disabled={!hasDraft || companionLoading}
+                      onClick={() => runAiAction("plan")}
+                    />
+                    <CompanionActionButton
+                      title="存成灵感"
+                      description="把一句想法贴进边栏"
+                      disabled={!hasDraft || companionLoading}
+                      onClick={() => runAiAction("idea")}
+                    />
+                  </div>
+                </div>
+                {aiErrorMode ? (
                   <div className="note-strip mt-4">
                     <p className="text-sm font-semibold text-ink">当前已切回演示整理模式。</p>
                     <p className="mt-2 text-sm leading-6 text-mist">真实模型暂时没接通，但你仍然可以继续测试这条专注、奖励和探索的闭环。</p>
                   </div>
                 ) : null}
               </section>
+
+              <section className="section-slab">
+                <SectionTitle eyebrow="行动轨迹" title="陪伴已经替你推进了哪些动作" caption="这里只展示看得见的行动证据，不展示内部推理。" />
+                {state.agent.pendingAction ? (
+                  <div className="note-strip mb-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-ink">当前这一步正在等你确认</p>
+                        <p className="mt-2 text-sm leading-6 text-mist">{state.agent.pendingAction.toolCall.reason}</p>
+                      </div>
+                      <span className={`story-chip ${agentTraceStatusClass("pending")}`}>{agentTraceStatusLabel("pending")}</span>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button type="button" className="story-button w-auto px-4 py-3" disabled={companionLoading} onClick={confirmPendingAgentAction}>
+                        按这个继续
+                      </button>
+                      <button type="button" className="story-button-secondary w-auto px-4 py-3" disabled={companionLoading} onClick={skipPendingAgentAction}>
+                        先不执行
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="space-y-3">
+                  {recentAgentTrace.length > 0 ? (
+                    recentAgentTrace.map((trace) => (
+                      <div key={trace.id} className="note-strip">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold leading-6 text-ink">{trace.message}</p>
+                            <p className="mt-1 text-xs text-mist">{relativeTime(trace.createdAt)}</p>
+                          </div>
+                          <span className={`story-chip ${agentTraceStatusClass(trace.status)}`}>{agentTraceStatusLabel(trace.status)}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="note-strip">
+                      <p className="text-sm font-semibold text-ink">还没有新的行动轨迹。</p>
+                      <p className="mt-2 text-sm leading-6 text-mist">说一句你现在最想推进的事，我会先给出建议，再在这里留下推进证据。</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+
               <section className="section-slab">
                 <SectionTitle
                   eyebrow="最近对话"
                   title="把关键互动整理成纸条"
-                  caption="这里不是普通聊天记录，而是陪伴如何持续把你推向下一步。"
+                  caption="这里不是普通聊天记录，而是陪伴如何持续把你推向下一步。往上滚也能看到更早的对话。"
                   trailing={(
                     <button
                       type="button"
                       className="story-button-secondary w-auto px-4 py-2.5 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={recentMessages.length === 0 || companionLoading}
+                      disabled={(recentMessages.length === 0 && recentAgentTrace.length === 0 && !state.agent.pendingAction) || companionLoading}
                       onClick={clearMessages}
                     >
                       清除记录
                     </button>
                   )}
                 />
-                <div className="space-y-4">
+                <div className="max-h-[34rem] space-y-4 overflow-y-auto pr-1">
                   {recentMessages.length > 0 ? (
                     recentMessages.map((message) => (
                       <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
-                        <span className="text-[11px] font-medium text-mist">{message.role === "user" ? "你" : activePet.name} · {relativeTime(message.createdAt)}</span>
+                        <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
+                          <span>{message.role === "user" ? "你" : activePet.name} · {relativeTime(message.createdAt)}</span>
+                          {message.role === "pet" && aiSourceLabel(message.aiSource) ? (
+                            <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">{aiSourceLabel(message.aiSource)}</span>
+                          ) : null}
+                        </div>
                         <div className={`message-card ${messageTone(message.type, message.role)}`}>
                           {message.type === "structuredPlan" && message.structuredPlan ? (
                             <StructuredPlanMessage
                               content={message.content}
                               plan={message.structuredPlan}
                               onPrimary={() => goToRouteOrStart(message.structuredPlan?.nextRoute)}
+                              onAddToTasks={() => {
+                                if (message.structuredPlan) {
+                                  addPlanStepsToTasks(message.structuredPlan, message.aiSource);
+                                }
+                              }}
                               onSecondary={generateJourneyPlan}
                             />
                           ) : (
                             <p className="text-sm leading-6 text-ink">{message.content}</p>
                           )}
-                          {message.type === "taskCard" && message.relatedTaskIds ? (
-                            <div className="mt-4">
-                              <TaskList tasks={state.tasks.filter((task) => message.relatedTaskIds?.includes(task.id))} onToggle={toggleTask} />
-                            </div>
-                          ) : null}
-                          {message.type === "imageCard" ? (
-                            <div className="note-strip mt-4">
-                              <div className="mx-auto w-fit">
-                                <PixelPet pet={activePet} size="sm" tone="home" />
-                              </div>
-                              <p className="mt-3 text-sm font-semibold leading-6 text-ink">{message.quoteRef}</p>
-                            </div>
-                          ) : null}
                         </div>
                       </article>
                     ))
-                  ) : (
+                  ) : null}
+                  {companionLoading && companionThinking ? (
+                    <article className="flex flex-col gap-2 items-start">
+                      <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
+                        <span>{activePet.name} · 刚刚</span>
+                        <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">整理中</span>
+                      </div>
+                      <div className="message-card bg-white/82 border-white/75">
+                        <p className="text-sm leading-6 text-ink">{thinkingCopy.title}</p>
+                        <div className="mt-4 space-y-2">
+                          {thinkingCopy.steps.map((step, index) => (
+                            <div key={`${step}-${index}`} className="ai-step-row">
+                              <span className="ai-step-index">{index + 1}</span>
+                              <p className="text-sm leading-6 text-ink">{step}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </article>
+                  ) : null}
+                  {recentMessages.length === 0 && !companionLoading ? (
                     <div className="note-strip">
                       <p className="text-sm font-semibold text-ink">最近对话已经清空了。</p>
                       <p className="mt-2 text-sm leading-6 text-mist">说一句你现在想推进的事，陪伴会从新的节奏重新接住你。</p>
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </section>
 
@@ -916,25 +1128,78 @@ export default function App() {
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <p className="text-xs text-mist">回车发送，Shift + Enter 换行</p>
                   <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft || companionLoading} onClick={sendDraftMessage}>
-                    {companionLoading ? "陪伴整理中..." : "让陪伴帮我整理"}
+                    {companionLoading ? "整理中..." : "发送"}
                   </button>
                 </div>
               </section>
 
               <section className="grid gap-3">
                 <div className="section-slab">
-                  <SectionTitle eyebrow="待办" title="今天还剩哪些动作" caption={`${openTasks.length} 项`} />
-                  <TaskList tasks={state.tasks.slice(0, 3)} onToggle={toggleTask} />
+                  <SectionTitle
+                    eyebrow="待办"
+                    title="今天还剩哪些动作"
+                    caption={openTasks.length > 0 ? `未完成 ${openTasks.length} 项` : "当前待办都已经完成了"}
+                    trailing={completedTasks.length > 0 ? (
+                      <button
+                        type="button"
+                        className="rounded-full border border-black/[0.08] bg-white/72 px-3 py-2 text-[11px] font-semibold tracking-[0.08em] text-mist transition hover:border-black/[0.14] hover:text-ink"
+                        onClick={clearCompletedTasks}
+                      >
+                        清空已完成
+                      </button>
+                    ) : null}
+                  />
+                  <TaskList tasks={openTasks.length > 0 ? openTasks : completedTasks.slice(0, 4)} onToggle={toggleTask} onRemove={removeTask} />
                 </div>
                 <div className="section-slab">
-                  <SectionTitle eyebrow="灵感" title="把值得保留的想法贴在边栏" caption={`${state.notes.length} 条`} />
+                  <SectionTitle
+                    eyebrow="灵感"
+                    title="先把值得留下的想法放在这里"
+                    caption={state.notes.length > 0 ? `${state.notes.length} 条，先记下来，不急着现在执行` : "先记下来，等准备好了再把它转成待办"}
+                    trailing={state.notes.length > 2 ? (
+                      <button
+                        type="button"
+                        className="rounded-full border border-black/[0.08] bg-white/72 px-3 py-2 text-[11px] font-semibold tracking-[0.08em] text-mist transition hover:border-black/[0.14] hover:text-ink"
+                        onClick={() => setShowAllNotes((current) => !current)}
+                      >
+                        {showAllNotes ? "收起灵感" : "查看更多"}
+                      </button>
+                    ) : null}
+                  />
                   <div className="space-y-3">
-                    {state.notes.slice(0, 2).map((note) => (
+                    {visibleNotes.map((note) => (
                       <div key={note.id} className="note-strip">
-                        <p className="text-sm font-semibold text-ink">{note.title}</p>
-                        <p className="mt-2 text-sm leading-6 text-mist">{note.body}</p>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-ink">{note.title}</p>
+                            <p className="mt-2 text-sm leading-6 text-mist">{note.body}</p>
+                          </div>
+                          <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">暂存</span>
+                        </div>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="story-button-secondary w-auto px-4 py-2.5"
+                            onClick={() => convertNoteToTasks(note.id)}
+                          >
+                            拆成待办
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-full border border-black/[0.08] bg-white/72 px-3.5 py-2 text-[11px] font-semibold tracking-[0.08em] text-mist transition hover:border-black/[0.14] hover:text-ink"
+                            onClick={() => removeNote(note.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
                       </div>
                     ))}
+                    {state.notes.length === 0 ? (
+                      <div className="note-strip">
+                        <p className="text-sm font-semibold text-ink">这里还没有新的灵感。</p>
+                        <p className="mt-2 text-sm leading-6 text-mist">当一句话暂时不想立刻执行时，可以先把它存成灵感，等准备好了再拆成待办。</p>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </section>

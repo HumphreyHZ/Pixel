@@ -15,7 +15,7 @@ import type {
 export const runtime = "nodejs";
 
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-chat";
+const DEFAULT_MODEL = "deepseek-v4-flash";
 const ALLOWED_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explore", "bank", "achievements", "battle", "shop"];
 const ALLOWED_MESSAGE_TYPES: MessageType[] = ["text", "taskCard", "focusPlan", "reward", "recap", "imageCard", "systemEvent", "structuredPlan"];
 const ALLOWED_TOOL_NAMES: AgentToolName[] = ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"];

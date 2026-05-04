@@ -49,15 +49,16 @@ export const seedState: DemoState = {
     { id: "note-2", title: "奖励反馈要串成闭环", body: "专注给晶石、步数给能量、兑换后再去探索，让用户一眼看懂完整主线。" },
   ],
   messages: [
-    { id: "msg-1", role: "pet", type: "text", content: "今天想先推进哪一步？我可以先陪你定任务，再一起走完专注和领奖。", createdAt: Date.now() - 1000 * 60 * 42 },
+    { id: "msg-1", role: "pet", type: "text", content: "今天想先推进哪一步？我可以先陪你定任务，再一起走完专注和领奖。", createdAt: Date.now() - 1000 * 60 * 42, petName: "绵羊" },
     { id: "msg-2", role: "user", type: "text", content: "先做一次 25 分钟专注，然后看看晶石和能量怎么接到探索上。", createdAt: Date.now() - 1000 * 60 * 34 },
-    { id: "msg-3", role: "pet", type: "taskCard", content: "我先把今天的主线排成 3 步，照着走就能把奖励闭环讲清楚。", createdAt: Date.now() - 1000 * 60 * 26, relatedTaskIds: ["task-1", "task-2", "task-3"] },
+    { id: "msg-3", role: "pet", type: "taskCard", content: "我先把今天的主线排成 3 步，照着走就能把奖励闭环讲清楚。", createdAt: Date.now() - 1000 * 60 * 26, petName: "绵羊", relatedTaskIds: ["task-1", "task-2", "task-3"] },
     {
       id: "msg-4",
       role: "pet",
       type: "structuredPlan",
       content: "我先把今天的主线拆成一版更顺手的路线。",
       createdAt: Date.now() - 1000 * 60 * 18,
+      petName: "绵羊",
       structuredPlan: {
         goalSummary: "把今天的主线讲顺",
         steps: ["先专注 25 分钟", "去奖励页领取步数能量", "再决定探索或陪伴复盘"],
@@ -67,7 +68,7 @@ export const seedState: DemoState = {
         why: "先让专注和奖励出现，再把后面的资源流动接上，会更顺。",
       },
     },
-    { id: "msg-5", role: "pet", type: "imageCard", content: "我把这条目标记成今天的旅程卡了。", createdAt: Date.now() - 1000 * 60 * 10, quoteRef: "专注完成后，优先提醒我去奖励页领取步数能量。" },
+    { id: "msg-5", role: "pet", type: "imageCard", content: "我把这条目标记成今天的旅程卡了。", createdAt: Date.now() - 1000 * 60 * 10, petName: "绵羊", quoteRef: "专注完成后，优先提醒我去奖励页领取步数能量。" },
   ],
   aiCards: [
     {

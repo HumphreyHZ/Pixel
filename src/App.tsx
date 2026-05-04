@@ -36,7 +36,6 @@ const extendedDemoRoutes: RouteKey[] = ["pets", "shop", "battle", "achievements"
 const companionPrompts = [
   { label: "拆成 3 步", value: "帮我把今天要推进的事拆成 3 步，越顺手越好。" },
   { label: "先专注还是休息", value: "我现在有点乱，帮我判断更适合先专注、先热身还是先休息整理。" },
-  { label: "讲清今天主线", value: "把今天的主线讲清楚：专注、领奖、探索和陪伴之间应该怎么接。" },
 ] as const;
 
 const petRoleCopy: Record<string, string> = {
@@ -203,23 +202,26 @@ function PromptChip({
   );
 }
 
-function CompanionActionButton({
-  title,
-  description,
-  disabled = false,
-  onClick,
-}: {
-  title: string;
-  description: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className="companion-action-button" disabled={disabled} onClick={onClick}>
-      <span className="companion-action-label">{title}</span>
-      <span className="companion-action-copy">{description}</span>
-    </button>
-  );
+function planPrimaryLabel(plan: StructuredPlan, isExecuting = false, isExecutionComplete = false, executionStepIndex?: number): string {
+  if (plan.nextRoute === "companion") {
+    if (!isExecuting) return "开始第一步";
+    if (isExecutionComplete) return "这三步已走完";
+    const stepNumber = Math.min((executionStepIndex ?? 0) + 1, plan.steps.length);
+    return `完成第 ${stepNumber} 步`;
+  }
+
+  if (plan.nextRoute === "focus") {
+    if (/热身/u.test(plan.recommendedDuration)) {
+      return `先热身 ${plan.recommendedDuration.replace(/\s+/g, "")}`;
+    }
+    return `先专注 ${plan.recommendedDuration.replace(/\s+/g, "")}`;
+  }
+
+  if (plan.nextRoute === "bank") return "去领取能量";
+  if (plan.nextRoute === "explore") return "去探索";
+  if (plan.nextRoute === "pets") return "去看看陪伴";
+
+  return plan.nextAction;
 }
 
 function AiModule({
@@ -277,16 +279,29 @@ function AiModule({
 function StructuredPlanMessage({
   content,
   plan,
+  executionStepIndex,
+  onAdvanceExecution,
   onPrimary,
   onAddToTasks,
   onSecondary,
 }: {
   content: string;
   plan: StructuredPlan;
+  executionStepIndex?: number;
+  onAdvanceExecution?: () => void;
   onPrimary: () => void;
   onAddToTasks: () => void;
   onSecondary: () => void;
 }) {
+  const isCompanionExecutionPlan = plan.nextRoute === "companion";
+  const isExecuting = isCompanionExecutionPlan && typeof executionStepIndex === "number";
+  const isExecutionComplete = isExecuting && executionStepIndex >= plan.steps.length;
+  const activeStepIndex = isExecutionComplete
+    ? plan.steps.length - 1
+    : Math.min(executionStepIndex ?? 0, Math.max(0, plan.steps.length - 1));
+  const primaryLabel = planPrimaryLabel(plan, isExecuting, isExecutionComplete, executionStepIndex);
+  const progressLabel = isExecutionComplete ? "三步都已经完成了" : `正在走第 ${activeStepIndex + 1} 步`;
+
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
@@ -303,21 +318,46 @@ function StructuredPlanMessage({
           <p className="ai-mini-title">建议顺序</p>
           <div className="mt-2 space-y-2">
             {plan.steps.map((step, index) => (
-              <div key={`${step}-${index}`} className="ai-step-row">
-                <span className="ai-step-index">{index + 1}</span>
+              <div
+                key={`${step}-${index}`}
+                className={`ai-step-row rounded-[20px] border px-3 py-3 transition ${
+                  isCompanionExecutionPlan
+                    ? index < activeStepIndex || isExecutionComplete
+                      ? "border-sage/40 bg-sage/18"
+                      : index === activeStepIndex && isExecuting
+                        ? "border-black/[0.08] bg-white/92 shadow-[0_10px_24px_rgba(28,23,18,0.05)]"
+                        : "border-black/[0.05] bg-white/68"
+                    : "border-transparent px-0 py-0"
+                }`}
+              >
+                <span className="ai-step-index">{isCompanionExecutionPlan && (index < activeStepIndex || isExecutionComplete) ? "✓" : index + 1}</span>
                 <p className="text-sm leading-6 text-ink">{step}</p>
               </div>
             ))}
           </div>
         </div>
         <div className="border-t border-black/[0.08] pt-4">
-          <p className="ai-mini-title">下一步</p>
-          <p className="mt-2 text-sm leading-6 text-ink">{plan.nextAction}</p>
+          <p className="ai-mini-title">{isCompanionExecutionPlan ? "执行进度" : "下一步"}</p>
+          <p className="mt-2 text-sm leading-6 text-ink">{isCompanionExecutionPlan ? progressLabel : plan.nextAction}</p>
+          {isCompanionExecutionPlan ? (
+            <p className="mt-1 text-sm leading-6 text-mist">
+              {!isExecuting
+                ? "这类生活任务更适合直接开始做，不需要再回到输入框。"
+                : isExecutionComplete
+                  ? "如果你想把它正式记下来，可以再点一次加入待办。"
+                  : "完成当前这一步后，我会把你切到下一步。"}
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        <button type="button" className="story-button w-auto px-4 py-3" onClick={onPrimary}>
-          按这个顺序去做
+        <button
+          type="button"
+          className="story-button w-auto px-4 py-3"
+          disabled={isCompanionExecutionPlan && isExecutionComplete}
+          onClick={isCompanionExecutionPlan && isExecuting && !isExecutionComplete && onAdvanceExecution ? onAdvanceExecution : onPrimary}
+        >
+          {primaryLabel}
         </button>
         <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onAddToTasks}>
           加入待办
@@ -350,7 +390,10 @@ function aiSourceLabel(source?: "model" | "fallback"): string | null {
   return null;
 }
 
-function companionThinkingCopy(action?: RouteKey | "message" | "tasks" | "plan" | "idea") {
+function companionThinkingCopy(
+  action?: RouteKey | "message" | "tasks" | "plan" | "idea",
+  intent?: "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "general",
+) {
   if (action === "tasks") {
     return {
       title: "正在把这件事拆成顺手的三步",
@@ -369,6 +412,55 @@ function companionThinkingCopy(action?: RouteKey | "message" | "tasks" | "plan" 
     return {
       title: "正在把这条想法收成灵感",
       steps: ["先提炼这句话里最值得留下的部分", "把它收成一条更清楚的灵感", "准备放进边栏方便后面继续展开"],
+    };
+  }
+
+  if (intent === "start") {
+    return {
+      title: "正在判断现在最适合从哪一步开始",
+      steps: ["先看你现在卡在起步、顺序还是决策", "判断更适合先专注、先领奖，还是先整理一下", "把最值得做的第一步先提出来"],
+    };
+  }
+
+  if (intent === "rest") {
+    return {
+      title: "正在平衡专注、热身和休息节奏",
+      steps: ["先接住你现在的状态", "判断该先热身、先缓一缓，还是直接推进", "尽量给你一个更低压力的起步方式"],
+    };
+  }
+
+  if (intent === "reward") {
+    return {
+      title: "正在整理奖励和能量该怎么接",
+      steps: ["先看你现在有没有待领资源", "判断更适合先领奖、先兑换，还是继续往下用", "把奖励页接回当前主线"],
+    };
+  }
+
+  if (intent === "explore") {
+    return {
+      title: "正在判断陪伴、探索和主线怎么接",
+      steps: ["先看你关心的是宠物、地图还是互动", "判断这一步该接在专注前还是奖励后", "把探索路线整理得更顺手一些"],
+    };
+  }
+
+  if (intent === "story") {
+    return {
+      title: "正在把今天这条主线讲顺",
+      steps: ["先抓住你现在最想强调的环节", "把专注、奖励和后续动作排成闭环", "尽量让下一步一眼就能看懂"],
+    };
+  }
+
+  if (intent === "capability") {
+    return {
+      title: "正在整理陪伴现在最能帮你的地方",
+      steps: ["先判断你是在问能力还是问下一步", "挑出最相关的几项整理方式", "用更自然的话把它说明白"],
+    };
+  }
+
+  if (intent === "greeting" || intent === "gratitude") {
+    return {
+      title: "正在准备一句更自然的陪伴回应",
+      steps: ["先接住你现在这句简单的话", "判断要不要顺手带一点下一步提示", "把语气收得温柔一点再回应"],
     };
   }
 
@@ -393,6 +485,7 @@ function AchievementSeal({ title, description, unlocked, index, evidence }: { ti
 }
 
 export default function App() {
+  const [companionExecutionSteps, setCompanionExecutionSteps] = useState<Record<string, number>>({});
   const {
     state,
     activePet,
@@ -402,6 +495,7 @@ export default function App() {
     companionLoading,
     companionThinking,
     aiErrorMode,
+    aiFallbackReason,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward,
@@ -448,7 +542,10 @@ export default function App() {
     () => (showAllNotes ? state.notes : state.notes.slice(0, 2)),
     [showAllNotes, state.notes],
   );
-  const thinkingCopy = useMemo(() => companionThinkingCopy(companionThinking?.action), [companionThinking?.action]);
+  const thinkingCopy = useMemo(
+    () => companionThinkingCopy(companionThinking?.action, companionThinking?.intent),
+    [companionThinking?.action, companionThinking?.intent],
+  );
   const todayCrystal = useMemo(() => completedSessions.reduce((sum, item) => sum + item.crystalReward, 0), [completedSessions]);
   const activePetProgress = Math.min(100, (activePet.exp / (activePet.level * 12)) * 100);
   const claimableEnergy = useMemo(
@@ -566,6 +663,10 @@ export default function App() {
 
   const homePrimaryLabel = state.focus.running ? "继续当前专注" : claimableEnergy > 0 ? "领取步数能量" : "开始本轮专注";
   const homeSecondaryLabel = state.focus.running ? "去陪伴页看任务" : claimableEnergy > 0 ? "再开下一轮专注" : "让陪伴帮我整理主线";
+  const companionFocusPlan = useMemo(() => {
+    if (state.agent.activePlan?.nextRoute !== "focus") return null;
+    return state.agent.activePlan;
+  }, [state.agent.activePlan]);
   const focusRuleCopy = !state.focus.running
     ? "倒计时模式会在归零后自动结算；正计时达到目标时长后，才会开放领奖按钮。需要快速录屏或测试时，可以使用演示跳过。"
     : state.focus.mode === "pomodoro"
@@ -600,10 +701,43 @@ export default function App() {
   const focusExpReward = state.focus.durationMinutes * 2;
   const focusStatusLabel = !state.focus.running ? "待开始" : canClaimFocusReward ? "可领奖" : "进行中";
 
-  function goToRouteOrStart(route?: RouteKey): void {
+  function startCompanionExecution(messageId: string): void {
+    setCompanionExecutionSteps((current) => ({
+      ...current,
+      [messageId]: 0,
+    }));
+  }
+
+  function advanceCompanionExecution(messageId: string, totalSteps: number): void {
+    setCompanionExecutionSteps((current) => {
+      const currentIndex = current[messageId] ?? 0;
+      return {
+        ...current,
+        [messageId]: Math.min(currentIndex + 1, totalSteps),
+      };
+    });
+  }
+
+  function focusCompanionDraft(nextStep: string): void {
+    setRoute("companion");
+    setDraft(nextStep);
+    window.requestAnimationFrame(() => {
+      const draftField = document.getElementById("companion-draft") as HTMLTextAreaElement | null;
+      draftField?.focus();
+      draftField?.scrollIntoView({ behavior: "smooth", block: "center" });
+      const valueLength = draftField?.value.length ?? 0;
+      draftField?.setSelectionRange(valueLength, valueLength);
+    });
+  }
+
+  function goToRouteOrStart(route?: RouteKey, nextStep?: string): void {
     if (!route) return;
     if (route === "focus" && !state.focus.running) {
       startFocus();
+      return;
+    }
+    if (route === "companion") {
+      focusCompanionDraft(nextStep ?? "");
       return;
     }
     setRoute(route);
@@ -783,6 +917,16 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                  {companionFocusPlan ? (
+                    <div className="note-strip">
+                      <p className="story-kicker !text-[10px]">来自陪伴页</p>
+                      <p className="mt-3 text-sm font-semibold leading-6 text-ink">{companionFocusPlan.goalSummary}</p>
+                      <div className="mt-3 space-y-2 text-sm leading-6 text-mist">
+                        <p>这轮建议：{companionFocusPlan.recommendedDuration}</p>
+                        <p>完成后下一步：{companionFocusPlan.steps[1] ?? "去奖励页领取能量"}</p>
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="note-strip" aria-live="polite">
                     <p className="story-kicker !text-[10px]">结算规则</p>
                     <p className="mt-3 text-sm leading-6 text-mist">{focusRuleCopy}</p>
@@ -942,8 +1086,8 @@ export default function App() {
                 <div className="companion-group mt-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
-                      <p className="companion-group-title">不知道怎么开口</p>
-                      <p className="mt-1 text-xs leading-5 text-mist">先点一句，我会把它带进输入区，你也可以继续改。</p>
+                      <p className="companion-group-title">可以直接这样说</p>
+                      <p className="mt-1 text-xs leading-5 text-mist">点一句，我会先带进输入区。你也可以顺手改成更像你自己的说法。</p>
                     </div>
                     {selectedPrompt ? <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">已带入</span> : null}
                   </div>
@@ -959,34 +1103,12 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div className="companion-group mt-4">
-                  <p className="companion-group-title">基于当前输入</p>
-                  <p className="mt-1 text-xs leading-5 text-mist">{hasDraft ? "这句会按你选的方式整理。" : "先写一句目标，再选怎么整理。"}</p>
-                  <div className="companion-action-grid mt-3">
-                    <CompanionActionButton
-                      title="拆成待办"
-                      description="把这句变成 3 个动作"
-                      disabled={!hasDraft || companionLoading}
-                      onClick={() => runAiAction("tasks")}
-                    />
-                    <CompanionActionButton
-                      title="排成顺序"
-                      description="把先后和下一步讲清楚"
-                      disabled={!hasDraft || companionLoading}
-                      onClick={() => runAiAction("plan")}
-                    />
-                    <CompanionActionButton
-                      title="存成灵感"
-                      description="把一句想法贴进边栏"
-                      disabled={!hasDraft || companionLoading}
-                      onClick={() => runAiAction("idea")}
-                    />
-                  </div>
-                </div>
                 {aiErrorMode ? (
                   <div className="note-strip mt-4">
                     <p className="text-sm font-semibold text-ink">当前已切回演示整理模式。</p>
-                    <p className="mt-2 text-sm leading-6 text-mist">真实模型暂时没接通，但你仍然可以继续测试这条专注、奖励和探索的闭环。</p>
+                    <p className="mt-2 text-sm leading-6 text-mist">
+                      {aiFallbackReason ?? "真实模型暂时没接通，但你仍然可以继续测试这条专注、奖励和探索的闭环。"}
+                    </p>
                   </div>
                 ) : null}
               </section>
@@ -1055,7 +1177,7 @@ export default function App() {
                     recentMessages.map((message) => (
                       <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
                         <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
-                          <span>{message.role === "user" ? "你" : activePet.name} · {relativeTime(message.createdAt)}</span>
+                          <span>{message.role === "user" ? "你" : (message.petName ?? activePet.name)} · {relativeTime(message.createdAt)}</span>
                           {message.role === "pet" && aiSourceLabel(message.aiSource) ? (
                             <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">{aiSourceLabel(message.aiSource)}</span>
                           ) : null}
@@ -1065,7 +1187,19 @@ export default function App() {
                             <StructuredPlanMessage
                               content={message.content}
                               plan={message.structuredPlan}
-                              onPrimary={() => goToRouteOrStart(message.structuredPlan?.nextRoute)}
+                              executionStepIndex={companionExecutionSteps[message.id]}
+                              onPrimary={() => {
+                                if (message.structuredPlan?.nextRoute === "companion") {
+                                  startCompanionExecution(message.id);
+                                  return;
+                                }
+                                goToRouteOrStart(message.structuredPlan?.nextRoute, message.structuredPlan?.nextAction);
+                              }}
+                              onAdvanceExecution={() => {
+                                if (message.structuredPlan) {
+                                  advanceCompanionExecution(message.id, message.structuredPlan.steps.length);
+                                }
+                              }}
                               onAddToTasks={() => {
                                 if (message.structuredPlan) {
                                   addPlanStepsToTasks(message.structuredPlan, message.aiSource);
@@ -1109,7 +1243,7 @@ export default function App() {
               </section>
 
               <section className="section-slab">
-                <SectionTitle eyebrow="输入区" title="说出你现在最想推进的事" caption="我会先把它接成今天的主线，再决定下一步该去专注、领奖还是探索。" />
+                <SectionTitle eyebrow="输入区" title="说出你现在最想推进的事" caption="先直接说一句。陪伴会先理解你的意思，再决定要不要拆步骤、排顺序，或把下一步讲清楚。" />
                 <textarea
                   id="companion-draft"
                   aria-label="输入今天想推进的目标"
@@ -1127,9 +1261,19 @@ export default function App() {
                 />
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <p className="text-xs text-mist">回车发送，Shift + Enter 换行</p>
-                  <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft || companionLoading} onClick={sendDraftMessage}>
-                    {companionLoading ? "整理中..." : "发送"}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="story-button-secondary w-auto px-4 py-3"
+                      disabled={!hasDraft || companionLoading}
+                      onClick={() => runAiAction("idea")}
+                    >
+                      存成灵感
+                    </button>
+                    <button type="button" className="story-button w-auto px-5 py-3" disabled={!hasDraft || companionLoading} onClick={sendDraftMessage}>
+                      {companionLoading ? "整理中..." : "发送"}
+                    </button>
+                  </div>
                 </div>
               </section>
 

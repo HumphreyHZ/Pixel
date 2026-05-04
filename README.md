@@ -43,22 +43,22 @@ def get_user(user_id: str):
     根据用户 ID 获取用户信息
     """
 四、前端规范（React）
-基本原则
+- 基本原则
 使用函数组件，不使用类组件
 单个组件只承担单一职责
 展示逻辑与业务逻辑分离
 可复用逻辑必须抽离为自定义 Hook
-命名约定
+- 命名约定
 组件名使用 PascalCase
 文件名与组件名保持一致
 自定义 Hook 必须以 use 开头
 function UserCard() {}
 function useUserData() {}
-Hooks 使用规范
+- Hooks 使用规范
 只能在函数组件或自定义 Hook 中调用
 不允许在条件、循环中调用
 一个 Hook 只处理一种职责
-Props 规范
+- Props 规范
 必须使用 TypeScript 类型定义
 使用解构方式接收 props
 非必传参数使用 ?
@@ -66,14 +66,15 @@ interface UserCardProps {
   user: User
   onClick?: () => void
 }
-性能与结构要求
+- 性能与结构要求
 避免不必要的重复渲染
 合理使用 useMemo / useCallback
 列表渲染必须提供稳定的 key
 大数据列表使用虚拟滚动
 路由与组件支持懒加载
+
 五、后端规范（Python）
-基本要求
+- 基本要求
 Python ≥ 3.10
 优先使用 FastAPI
 所有函数与方法必须标注类型
@@ -87,21 +88,22 @@ schema：请求 / 响应数据校验
 model：ORM 模型定义
 禁止在 api 层直接操作数据库。
 
-日志规范
+- 日志规范
 使用 logging 模块
 合理区分日志级别（DEBUG / INFO / WARNING / ERROR）
 日志中不得包含敏感信息
+
 六、安全规范（重点）
-通用安全原则
+- 通用安全原则
 永远不信任客户端输入
 所有输入必须进行校验
 敏感操作必须经过身份与权限校验
-前端安全
+- 前端安全
 禁止使用 dangerouslySetInnerHTML
 防止 XSS / CSRF 攻击
 不在前端存储敏感信息
 Token 推荐使用 HttpOnly Cookie
-后端安全
+- 后端安全
 使用 Pydantic 进行参数校验
 权限校验必须在 service 层完成
 所有密钥从环境变量中读取
@@ -109,6 +111,7 @@ import os
 SECRET_KEY = os.getenv("SECRET_KEY")
 敏感字段返回前需脱敏
 密码等敏感数据必须加密存储
+
 七、AI 协作使用规范
 所有自动生成的代码必须遵守本规则
 

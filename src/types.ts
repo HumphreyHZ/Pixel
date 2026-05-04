@@ -85,6 +85,7 @@ export interface CompanionMessage {
   type: MessageType;
   content: string;
   createdAt: number;
+  petName?: string;
   aiSource?: "model" | "fallback";
   relatedTaskIds?: string[];
   quoteRef?: string;

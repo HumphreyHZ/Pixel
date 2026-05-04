@@ -14,6 +14,7 @@ import type {
   CompanionAIContext,
   CompanionAIRequest,
   CompanionAIResponse,
+  CompanionMessage,
   DemoState,
   FocusSession,
   Pet,
@@ -105,6 +106,34 @@ function normalizePets(pets: Pet[], selectedPetId?: string): Pet[] {
 
 function getActivePetFromState(currentState: Pick<DemoState, "pets" | "selectedPetId">): Pet {
   return currentState.pets.find((pet) => pet.id === currentState.selectedPetId) ?? currentState.pets[0];
+}
+
+function createPetMessage(
+  currentState: Pick<DemoState, "pets" | "selectedPetId">,
+  message: Omit<CompanionMessage, "role" | "petName">,
+): CompanionMessage {
+  return {
+    ...message,
+    role: "pet",
+    petName: getActivePetFromState(currentState).name,
+  };
+}
+
+function inferMessagePetName(
+  message: CompanionMessage,
+  pets: Pet[],
+  fallbackSelectedPetId: string,
+): string | undefined {
+  if (message.role !== "pet") return message.petName;
+  if (message.petName) return message.petName;
+
+  const matchedPet = pets.find((pet) =>
+    message.content.includes(pet.name) || (message.quoteRef?.includes(pet.name) ?? false),
+  );
+
+  if (matchedPet) return matchedPet.name;
+
+  return pets.find((pet) => pet.id === fallbackSelectedPetId)?.name ?? pets[0]?.name;
 }
 
 function isAppFlowDraft(draft: string): boolean {
@@ -678,6 +707,36 @@ function buildCompanionContext(currentState: DemoState): CompanionAIContext {
   };
 }
 
+function describeCompanionFallbackReason(error: unknown): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "这次真实整理超时了，我先用演示模式把这一步接住。";
+  }
+
+  const message = error instanceof Error ? error.message : "";
+
+  if (message.includes("invalid_companion_payload") || message.includes("invalid_model_json")) {
+    return "真实模型这次返回的结果格式没对上，我先切回演示模式。";
+  }
+
+  if (message.includes("missing_deepseek_api_key") || message.includes("companion_api_401") || message.includes("companion_api_403")) {
+    return "真实模型这次没有拿到可用凭据，我先切回演示模式。";
+  }
+
+  if (message.includes("companion_api_429")) {
+    return "真实模型这会儿有点忙，我先切回演示模式。";
+  }
+
+  if (message.includes("companion_api_500")) {
+    return "真实整理接口这次返回失败了，我先切回演示模式。";
+  }
+
+  if (message.includes("companion_api_")) {
+    return "真实整理接口这次没有顺利返回结果，我先切回演示模式。";
+  }
+
+  return "真实整理这次没有顺利完成，我先切回演示模式。";
+}
+
 async function requestCompanionModel(action: CompanionAIAction, draft: string, currentState: DemoState): Promise<CompanionAIResponse> {
   const payload: CompanionAIRequest = {
     action,
@@ -698,7 +757,17 @@ async function requestCompanionModel(action: CompanionAIAction, draft: string, c
     });
 
     if (!response.ok) {
-      throw new Error(`companion_api_${response.status}`);
+      let detail = "";
+      try {
+        const errorBody: unknown = await response.json();
+        if (isRecord(errorBody) && isNonEmptyString(errorBody.error)) {
+          detail = errorBody.error.trim();
+        }
+      } catch {
+        // Ignore response parsing errors for failed requests.
+      }
+
+      throw new Error(detail ? `companion_api_${response.status}:${detail}` : `companion_api_${response.status}`);
     }
 
     const data: unknown = await response.json();
@@ -1016,6 +1085,10 @@ function loadState(): DemoState {
         playerHp: seedState.battle.playerMaxHp,
         logs: [createBattleIntroLog(activePet.name)],
       },
+      messages: (parsed.messages ?? seedState.messages).map((message) => ({
+        ...message,
+        petName: inferMessagePetName(message, nextPets, activePet.id),
+      })),
       aiCards: parsed.aiCards ?? seedState.aiCards,
       agent: normalizeAgentState(seedState, parsed.agent ?? seedState.agent),
     };
@@ -1041,8 +1114,10 @@ export function useDemoState() {
   const [now, setNow] = useState<number>(Date.now());
   const [companionLoading, setCompanionLoading] = useState(false);
   const [aiErrorMode, setAiErrorMode] = useState(false);
+  const [aiFallbackReason, setAiFallbackReason] = useState<string | null>(null);
   const [companionThinking, setCompanionThinking] = useState<null | {
     action: CompanionAIAction;
+    intent: LocalCompanionIntent;
     draft: string;
     startedAt: number;
   }>(null);
@@ -1280,7 +1355,7 @@ export function useDemoState() {
       addUserMessage: boolean;
       clearDraft: boolean;
       userMessageContent?: string;
-      fallbackNotice?: boolean;
+      fallbackNoticeContent?: string;
     },
   ): DemoState {
     const createdAt = Date.now();
@@ -1296,15 +1371,14 @@ export function useDemoState() {
       lastObservedSnapshot: createAgentSnapshot(current),
     });
 
-    if (options.fallbackNotice) {
-      nextMessages.push({
+    if (options.fallbackNoticeContent) {
+      nextMessages.push(createPetMessage(current, {
         id: createId("msg"),
-        role: "pet",
         type: "systemEvent",
-        content: FALLBACK_NOTICE,
+        content: options.fallbackNoticeContent,
         createdAt,
         aiSource: "fallback",
-      });
+      }));
     }
 
     if (options.addUserMessage) {
@@ -1322,7 +1396,8 @@ export function useDemoState() {
     let nextFocus = current.focus;
     let nextRoute = "companion" as RouteKey;
     const cardsToUpsert: AICard[] = [];
-    const normalizedToolCalls = normalizeAgentToolCalls(action, draft, current, result);
+    const normalizedToolCalls = normalizeAgentToolCalls(action, draft, current, result)
+      .filter((toolCall) => !(action === "tasks" && toolCall.name === "createTasks"));
 
     if (result.structuredPlan) {
       cardsToUpsert.push(createJourneyPlanCard(result.structuredPlan));
@@ -1332,24 +1407,22 @@ export function useDemoState() {
       if (action === "plan") {
         nextFocus = { ...current.focus, source: "ai" };
       }
-      nextMessages.push({
+      nextMessages.push(createPetMessage(current, {
         id: createId("msg"),
-        role: "pet",
         type: "structuredPlan",
         content: result.content,
         createdAt,
         aiSource: result.source,
         structuredPlan: result.structuredPlan,
-      });
+      }));
     } else {
-      nextMessages.push({
+      nextMessages.push(createPetMessage(current, {
         id: createId("msg"),
-        role: "pet",
         type: "text",
         content: result.content,
         createdAt,
         aiSource: result.source,
-      });
+      }));
     }
 
     let workingState: DemoState = {
@@ -1425,6 +1498,7 @@ export function useDemoState() {
     setAiErrorMode(false);
     setCompanionThinking({
       action: resolvedRequest.action,
+      intent: detectLocalCompanionIntent(resolvedRequest.requestDraft),
       draft: resolvedRequest.userMessageContent,
       startedAt: Date.now(),
     });
@@ -1456,6 +1530,7 @@ export function useDemoState() {
 
     try {
       const modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
+      setAiFallbackReason(null);
       setState((current) =>
         applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, modelResult, {
           addUserMessage: false,
@@ -1463,15 +1538,17 @@ export function useDemoState() {
           userMessageContent: resolvedRequest.userMessageContent,
         }),
       );
-    } catch {
+    } catch (error) {
       const fallbackResult = createFallbackCompanionResult(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
+      const fallbackReason = describeCompanionFallbackReason(error);
       setAiErrorMode(true);
+      setAiFallbackReason(fallbackReason);
       setState((current) =>
         applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, fallbackResult, {
           addUserMessage: false,
           clearDraft: false,
           userMessageContent: resolvedRequest.userMessageContent,
-          fallbackNotice: true,
+          fallbackNoticeContent: `${FALLBACK_NOTICE} 原因：${fallbackReason}`,
         }),
       );
     } finally {
@@ -1597,23 +1674,21 @@ export function useDemoState() {
       achievements: patchAchievements(nextSessions, current.steps.some((item) => item.redeemed), nextPets),
       messages: [
         ...current.messages,
-        {
+        createPetMessage({ pets: nextPets, selectedPetId: current.selectedPetId }, {
           id: createId("msg"),
-          role: "pet",
           type: "reward",
           content:
             source === "demo"
               ? `演示跳过完成，直接结算 ${rewardCrystal} 枚像素晶石和 ${rewardExp} 点经验，方便你继续测试后续闭环。`
               : `专注达标，拿到 ${rewardCrystal} 枚像素晶石和 ${rewardExp} 点经验，当前陪伴宠物也一起成长了。`,
           createdAt: Date.now(),
-        },
-        {
+        }),
+        createPetMessage({ pets: nextPets, selectedPetId: current.selectedPetId }, {
           id: createId("msg"),
-          role: "pet",
           type: "recap",
           content: recapContent,
           createdAt: Date.now(),
-        },
+        }),
       ],
     }, [createFocusRecapCard(source)]);
   }
@@ -1702,13 +1777,12 @@ export function useDemoState() {
         ],
         messages: [
           ...current.messages,
-          {
+          createPetMessage(current, {
             id: createId("msg"),
-            role: "pet",
             type: "recap",
             content: "这轮先记成放弃，不会发放奖励。等你准备好，我们再从下一轮继续。",
             createdAt: Date.now(),
-          },
+          }),
         ],
       });
     });
@@ -1884,13 +1958,12 @@ export function useDemoState() {
         route: "companion",
         messages: [
           ...current.messages,
-          {
+          createPetMessage(current, {
             id: createId("msg"),
-            role: "pet",
             type: "text",
             content: createPetAdvice(currentPet),
             createdAt: Date.now(),
-          },
+          }),
         ],
       });
     });
@@ -2019,13 +2092,12 @@ export function useDemoState() {
         },
         messages: [
           ...current.messages,
-          {
+          createPetMessage({ pets: nextPets, selectedPetId: petId }, {
             id: createId("msg"),
-            role: "pet",
             type: "systemEvent",
             content: `已切换为${nextActivePet.name}，后续建议和对战开场会跟着变化。`,
             createdAt: Date.now(),
-          },
+          }),
         ],
       });
     });
@@ -2059,7 +2131,7 @@ export function useDemoState() {
         achievements: patchAchievements(current.sessions, true, current.pets),
         messages: [
           ...current.messages,
-          { id: createId("msg"), role: "pet", type: "systemEvent", content: `步数到账：${target.energyEarned} 点能量已经放进你的奖励页，现在可以考虑兑换成晶石了。`, createdAt: Date.now() },
+          createPetMessage(current, { id: createId("msg"), type: "systemEvent", content: `步数到账：${target.energyEarned} 点能量已经放进你的奖励页，现在可以考虑兑换成晶石了。`, createdAt: Date.now() }),
         ],
       });
     });
@@ -2078,13 +2150,12 @@ export function useDemoState() {
         },
         messages: [
           ...current.messages,
-          {
+          createPetMessage(current, {
             id: createId("msg"),
-            role: "pet",
             type: "systemEvent",
             content: `已兑换 ${crystals} 枚像素晶石。现在资源更充足了，可以去喂食、探索，或者继续开下一轮专注。`,
             createdAt: Date.now(),
-          },
+          }),
         ],
       });
     });
@@ -2099,7 +2170,7 @@ export function useDemoState() {
         mapNodes: current.mapNodes.map((node) => (node.id === nodeId ? { ...node, explored: node.explored + 1 } : node)),
         messages: [
           ...current.messages,
-          { id: createId("msg"), role: "pet", type: "systemEvent", content: "探索成功，带回 12 枚像素晶石，还顺手点亮了一段新的地图记忆。", createdAt: Date.now() },
+          createPetMessage(current, { id: createId("msg"), type: "systemEvent", content: "探索成功，带回 12 枚像素晶石，还顺手点亮了一段新的地图记忆。", createdAt: Date.now() }),
         ],
       });
     });
@@ -2211,7 +2282,7 @@ export function useDemoState() {
         pets: nextPets,
         messages: [
           ...current.messages,
-          { id: createId("msg"), role: "pet", type: "systemEvent", content: purchaseMessage, createdAt: Date.now() },
+          createPetMessage({ pets: nextPets, selectedPetId: current.selectedPetId }, { id: createId("msg"), type: "systemEvent", content: purchaseMessage, createdAt: Date.now() }),
         ],
       });
     });
@@ -2238,6 +2309,7 @@ export function useDemoState() {
     companionLoading,
     companionThinking,
     aiErrorMode,
+    aiFallbackReason,
     timerSeconds,
     focusElapsedSeconds,
     canClaimFocusReward: canClaimCurrentFocusReward,

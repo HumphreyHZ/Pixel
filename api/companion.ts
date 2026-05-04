@@ -232,6 +232,99 @@ function parseToolCalls(value: unknown): AgentToolCall[] | undefined {
   return toolCalls.length ? toolCalls : undefined;
 }
 
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((item): item is string => isNonEmptyString(item))
+    .map((item) => item.trim())
+    .slice(0, 3);
+}
+
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
+function extractLenientMessageContent(value: unknown): string | null {
+  if (isNonEmptyString(value)) {
+    return normalizeWhitespace(value);
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const candidates = [value.content, value.message, value.reply, value.text];
+  for (const candidate of candidates) {
+    if (isNonEmptyString(candidate)) {
+      return normalizeWhitespace(candidate);
+    }
+  }
+
+  return null;
+}
+
+function inferTaskTitlesFromDraft(draft: string): string[] {
+  if (/(洗澡|清洗|洗一洗|洗猫|洗狗)/u.test(draft) && /(猫|猫咪|猫猫|小猫)/u.test(draft)) {
+    return ["准备温水、毛巾和洗澡用品", "先安抚猫咪，再快速温和地完成清洗", "擦干吹干并观察猫咪状态"];
+  }
+
+  if (/(遛狗|狗狗|小狗|散步)/u.test(draft)) {
+    return ["准备牵引绳、拾便袋和水", "出门走一段安静顺手的路线", "回家后擦脚、补水并安顿好狗狗"];
+  }
+
+  if (/(遛猫|猫咪散步|带猫咪出门)/u.test(draft)) {
+    return ["准备牵引绳和外出小用品", "挑一段安静路线，慢慢陪猫咪适应", "回家后擦脚、补水并让猫咪休息"];
+  }
+
+  return ["先准备好第一步需要的东西", "把中间最关键的动作单独完成", "收尾整理好，再确认下一步"];
+}
+
+function extractTaskTitlesFromToolCalls(toolCalls?: AgentToolCall[]): string[] {
+  const createTasksCall = toolCalls?.find((toolCall) => toolCall.name === "createTasks");
+  return normalizeStringList(createTasksCall?.args?.titles);
+}
+
+function isReadableNextAction(value: string): boolean {
+  return /[\u4e00-\u9fff]/u.test(value) && !/^(noop|complete|startFocus)$/iu.test(value.trim());
+}
+
+function normalizeStructuredPlanForDraft(
+  plan: StructuredPlan,
+  draft: string,
+  fallbackSteps: string[],
+): StructuredPlan {
+  const nextRoute = !isCompanionFlowDraft(draft) && plan.nextRoute === "home" ? "companion" : plan.nextRoute;
+  const nextAction = isReadableNextAction(plan.nextAction) ? plan.nextAction.trim() : (fallbackSteps[0] ?? plan.steps[0] ?? "先从第一步开始");
+  const why = isNonEmptyString(plan.why)
+    ? plan.why.trim()
+    : "先把事情拆小，再一步一步往下走，会更容易开始，也更容易坚持。";
+
+  return {
+    ...plan,
+    nextRoute,
+    nextAction,
+    why,
+  };
+}
+
+function buildFallbackStructuredPlan(draft: string, steps: string[]): StructuredPlan {
+  const safeSteps = steps.length === 3 ? steps : inferTaskTitlesFromDraft(draft);
+
+  return {
+    goalSummary: !isCompanionFlowDraft(draft)
+      ? "把这件事拆成三个顺手步骤，让过程更轻松"
+      : "先把这条主线拆顺，再决定下一步",
+    steps: safeSteps,
+    recommendedDuration: !isCompanionFlowDraft(draft) ? "照着三步慢慢来" : "25 分钟当前节奏",
+    nextRoute: !isCompanionFlowDraft(draft) ? "companion" : "focus",
+    nextAction: safeSteps[0] ?? "先从第一步开始",
+    why: "先把事情拆小，再一步一步往下走，会更容易开始，也更容易坚持。",
+  };
+}
+
 function parseRequestBody(value: unknown): CompanionAIRequest | null {
   if (!isRecord(value)) return null;
 
@@ -254,6 +347,28 @@ function parseRequestBody(value: unknown): CompanionAIRequest | null {
 }
 
 function parseModelResult(value: unknown, action: CompanionAIAction): CompanionAIResponse | null {
+  if (action === "message") {
+    const content = extractLenientMessageContent(value);
+    if (!content) {
+      return null;
+    }
+
+    const toolCalls = isRecord(value) ? parseToolCalls(value.toolCalls) : undefined;
+    const structuredPlan = isRecord(value) && value.structuredPlan ? parseStructuredPlan(value.structuredPlan) : undefined;
+    return structuredPlan
+      ? {
+          content,
+          source: "model",
+          toolCalls,
+          structuredPlan,
+        }
+      : {
+          content,
+          source: "model",
+          toolCalls,
+        };
+  }
+
   if (!isRecord(value) || !isNonEmptyString(value.content)) {
     return null;
   }
@@ -281,23 +396,17 @@ function parseModelResult(value: unknown, action: CompanionAIAction): CompanionA
 
   const structuredPlan = value.structuredPlan ? parseStructuredPlan(value.structuredPlan) : undefined;
 
-  if (action === "message") {
-    return structuredPlan
-      ? {
-          ...baseResult,
-          structuredPlan,
-        }
-      : baseResult;
-  }
-
-  if (!structuredPlan) {
-    return null;
-  }
-
   if (action === "tasks") {
-    const tasks = Array.isArray(value.tasks)
-      ? value.tasks.filter((item): item is string => isNonEmptyString(item)).map((item) => item.trim()).slice(0, 3)
-      : [];
+    const tasksFromPayload = normalizeStringList(value.tasks);
+    const tasksFromPlan = normalizeStringList(isRecord(value.structuredPlan) ? value.structuredPlan.steps : undefined);
+    const tasksFromToolCalls = extractTaskTitlesFromToolCalls(baseResult.toolCalls);
+    const tasks = tasksFromPayload.length === 3
+      ? tasksFromPayload
+      : tasksFromPlan.length === 3
+        ? tasksFromPlan
+        : tasksFromToolCalls.length === 3
+          ? tasksFromToolCalls
+          : [];
 
     if (tasks.length !== 3) {
       return null;
@@ -305,9 +414,13 @@ function parseModelResult(value: unknown, action: CompanionAIAction): CompanionA
 
     return {
       ...baseResult,
-      structuredPlan,
+      structuredPlan: structuredPlan ?? buildFallbackStructuredPlan("先把这件事拆成三步", tasks),
       tasks,
     };
+  }
+
+  if (!structuredPlan) {
+    return null;
   }
 
   return {
@@ -410,44 +523,79 @@ async function getConfigValue(name: string): Promise<string | undefined> {
   return fallbackValue && fallbackValue.trim().length > 0 ? fallbackValue.trim() : undefined;
 }
 
-function polishCompanionCopy(text: string, activePetName: string): string {
+function isCompanionFlowDraft(draft: string): boolean {
+  return /(专注|奖励|能量|步数|晶石|探索|宠物|图鉴|喂食|互动|地图|陪伴|主线|闭环|领奖|对战|商店)/u.test(draft);
+}
+
+function getRealLifePetLabel(draft: string): string | null {
+  if (/(猫|猫咪|猫猫|小猫)/u.test(draft)) return "猫咪";
+  if (/(狗|狗狗|小狗|遛狗)/u.test(draft)) return "狗狗";
+  return null;
+}
+
+function shouldAvoidActivePetBinding(draft: string): boolean {
+  return Boolean(getRealLifePetLabel(draft)) && !isCompanionFlowDraft(draft);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function polishCompanionCopy(
+  text: string,
+  activePetName: string,
+  options?: { avoidActivePetBinding?: boolean; lifePetLabel?: string | null },
+): string {
   const trimmed = text.trim();
   const withoutPetIntro = trimmed.startsWith(`${activePetName}看到你回来了，`)
     ? trimmed.slice(`${activePetName}看到你回来了，`.length)
     : trimmed;
 
-  return withoutPetIntro
+  let polished = withoutPetIntro
     .replace(/[?？]{2,}/g, activePetName)
     .replace(/^看到你[^，。！？!?]*[，,]\s*/u, "")
     .replace(/^好呀[，,]\s*/u, "好呀，")
-    .replace(/陪伴小羊/g, `让${activePetName}陪你`)
-    .replace(/陪伴宠物/g, `和${activePetName}继续往前走`)
     .replace(/用户/g, "你")
     .replace(/APP/g, "旅程")
     .replace(/(\d+)\s*分钟/g, "$1 分钟")
     .replace(/(\d+)\s*点能量\s+/g, "$1 点能量")
-    .replace(/\b宠物\b/g, activePetName)
     .trim();
+
+  if (options?.avoidActivePetBinding && options.lifePetLabel) {
+    polished = polished
+      .replace(new RegExp(escapeRegExp(activePetName), "g"), options.lifePetLabel)
+      .replace(/陪伴小羊/g, options.lifePetLabel)
+      .replace(/陪伴宠物/g, options.lifePetLabel)
+      .replace(/宠物/g, options.lifePetLabel);
+  } else {
+    polished = polished
+      .replace(/陪伴小羊/g, `让${activePetName}陪你`)
+      .replace(/陪伴宠物/g, `和${activePetName}继续往前走`)
+      .replace(/宠物/g, activePetName);
+  }
+
+  return polished.trim();
 }
 
 function polishStructuredPlan(
   plan: StructuredPlan,
   activePetName: string,
+  options?: { avoidActivePetBinding?: boolean; lifePetLabel?: string | null },
 ): StructuredPlan {
   const polishedSteps = plan.steps.map((step) =>
-    polishCompanionCopy(step, activePetName)
+    polishCompanionCopy(step, activePetName, options)
       .replace(/(\d+)\s*点能量\s+/g, "$1 点能量"),
   );
 
   return {
     ...plan,
-    goalSummary: polishCompanionCopy(plan.goalSummary, activePetName),
+    goalSummary: polishCompanionCopy(plan.goalSummary, activePetName, options),
     steps: polishedSteps,
     recommendedDuration: plan.recommendedDuration
       .replace(/(\d+)\s*分钟/u, "$1 分钟")
       .replace(/^(\d+ 分钟)$/u, "$1 深度专注"),
-    nextAction: polishCompanionCopy(plan.nextAction, activePetName),
-    why: polishCompanionCopy(plan.why, activePetName),
+    nextAction: polishCompanionCopy(plan.nextAction, activePetName, options),
+    why: polishCompanionCopy(plan.why, activePetName, options),
   };
 }
 
@@ -455,7 +603,7 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
   const intent = detectDraftIntent(draft);
   const basePrompt = [
     "你是一个像素宠物专注 app 的陪伴整理助手。",
-    `当前陪伴名字是：${context.activePet.name}。如果需要提到宠物，只能自然地使用这个名字。`,
+    `当前陪伴名字是：${context.activePet.name}。只有在用户明确在说 app 里的当前陪伴、探索、喂食、图鉴或宠物互动时，才自然地使用这个名字。`,
     "语气要治愈、聪明、有陪伴感，用短句和鼓励式表达。",
     "先直接回应用户眼前这句话，再决定要不要顺手给下一步建议。",
     "只有在用户明确请求整理主线、拆步骤、决定下一步时，才把回答组织成清晰计划。",
@@ -468,6 +616,7 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
     "如果用户只是打招呼、表达情绪、提到自己有点乱、累、走神，先回应状态本身，不要立刻拉去专注。",
     "如果提到资源，优先说“把奖励接回来”或“去奖励页把能量领回来”。",
     "如果提到宠物，不要写“陪伴小羊”“陪伴宠物”这种生硬说法，要写成自然句子。",
+    "如果用户说的是现实生活里的猫狗、遛狗、散步、洗猫、洗澡等日常事务，不要把它写成当前陪伴名字，也不要把现实里的动物替换成 app 陪伴角色。",
     "避免使用“看到你回来了”“开始专注任务”“开启番茄钟”这种像模板或工具说明的说法。",
     "不要用“看到你…所以…”、“用户”、“任务助手”、“APP 功能”、“系统建议”这种机械或旁白式表达。",
     "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘、产品设计等打破产品语境的词。",
@@ -509,7 +658,48 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
   return [...basePrompt, intentPromptMap[intent], actionPromptMap[action]].join("\n");
 }
 
-async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIResponse> {
+function normalizeParsedResultForDraft(payload: CompanionAIRequest, parsed: CompanionAIResponse): CompanionAIResponse {
+  const avoidActivePetBinding = shouldAvoidActivePetBinding(payload.draft);
+  const lifePetLabel = getRealLifePetLabel(payload.draft);
+  const tasks = parsed.tasks?.length === 3 ? parsed.tasks : extractTaskTitlesFromToolCalls(parsed.toolCalls);
+
+  return {
+    ...parsed,
+    content: polishCompanionCopy(parsed.content, payload.context.activePet.name, {
+      avoidActivePetBinding,
+      lifePetLabel,
+    }),
+    structuredPlan: parsed.structuredPlan
+      ? polishStructuredPlan(
+          normalizeStructuredPlanForDraft(parsed.structuredPlan, payload.draft, tasks),
+          payload.context.activePet.name,
+          {
+            avoidActivePetBinding,
+            lifePetLabel,
+          },
+        )
+      : undefined,
+    tasks,
+  };
+}
+
+function shouldRetryModelError(error: unknown, action: CompanionAIAction, attempt: number): boolean {
+  if (attempt > 0 || action === "message") {
+    return false;
+  }
+
+  if (error instanceof SyntaxError) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : "";
+  return /missing_model_content|invalid_model_json|deepseek_5\d{2}|Expected .* after property value|Expected ',' or '\}'/u.test(message);
+}
+
+async function requestDeepSeekContent(
+  payload: CompanionAIRequest,
+  options?: { retryMode?: boolean },
+): Promise<string> {
   const apiKey = await getConfigValue("DEEPSEEK_API_KEY");
   if (!apiKey) {
     throw new Error("missing_deepseek_api_key");
@@ -520,6 +710,9 @@ async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIRes
   const model = (await getConfigValue("DEEPSEEK_MODEL")) ?? DEFAULT_MODEL;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const retryNote = options?.retryMode
+    ? "\n你上一次输出缺了必要字段。这一次务必返回完整 JSON，不能省略 content、structuredPlan、tasks、note 或 quoteRef 中当前动作要求的字段。"
+    : "";
 
   try {
     const response = await fetch(endpoint, {
@@ -530,13 +723,13 @@ async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIRes
       },
       body: JSON.stringify({
         model,
-        temperature: payload.action === "message" ? 0.9 : 0.6,
+        temperature: payload.action === "message" ? 0.9 : options?.retryMode ? 0 : 0.2,
         max_tokens: 900,
         response_format: { type: "json_object" },
         messages: [
           {
             role: "system",
-            content: buildSystemPrompt(payload.action, payload.context, payload.draft),
+            content: `${buildSystemPrompt(payload.action, payload.context, payload.draft)}${retryNote}`,
           },
           {
             role: "user",
@@ -568,27 +761,63 @@ async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIRes
       throw new Error("missing_model_content");
     }
 
-    const parsed = parseModelResult(JSON.parse(stripJsonFence(content)), payload.action);
-    if (!parsed) {
-      throw new Error("invalid_model_json");
-    }
-
-    return {
-      ...parsed,
-      content: polishCompanionCopy(parsed.content, payload.context.activePet.name),
-      structuredPlan: parsed.structuredPlan
-        ? polishStructuredPlan(parsed.structuredPlan, payload.context.activePet.name)
-        : undefined,
-    };
+    return content;
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
+async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIResponse> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const content = await requestDeepSeekContent(payload, { retryMode: attempt > 0 });
+      const sanitizedContent = stripJsonFence(content);
+      let parsedValue: unknown;
+
+      try {
+        parsedValue = JSON.parse(sanitizedContent);
+      } catch (error) {
+        if (payload.action === "message") {
+          return normalizeParsedResultForDraft(payload, {
+            content: normalizeWhitespace(sanitizedContent),
+            source: "model",
+          });
+        }
+
+        throw error;
+      }
+
+      const parsed = parseModelResult(parsedValue, payload.action);
+      if (!parsed) {
+        throw new Error("invalid_model_json");
+      }
+
+      return normalizeParsedResultForDraft(payload, parsed);
+    } catch (error) {
+      lastError = error;
+      console.error("[companion] model_parse_failed", {
+        action: payload.action,
+        draft: payload.draft.slice(0, 120),
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!shouldRetryModelError(error, payload.action, attempt)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("companion_model_error");
+}
+
 export async function POST(request: Request): Promise<Response> {
+  let payload: CompanionAIRequest | null = null;
+
   try {
     const body: unknown = await request.json();
-    const payload = parseRequestBody(body);
+    payload = parseRequestBody(body);
 
     if (!payload) {
       return Response.json({ error: "invalid_companion_request" }, { status: 400 });
@@ -598,6 +827,12 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "companion_model_error";
+    console.error("[companion] request_failed", {
+      action: payload?.action ?? null,
+      draft: payload?.draft.slice(0, 120) ?? null,
+      error: message,
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return Response.json({ error: message }, { status: 500 });
   }
 }

@@ -16,8 +16,11 @@ import type {
   CompanionAIResponse,
   CompanionMessage,
   DemoState,
+  FocusBrief,
+  FocusRecap,
   FocusSession,
   Pet,
+  PlanKind,
   RouteKey,
   StructuredPlan,
   TaskItem,
@@ -68,6 +71,18 @@ function createAgentTrace(message: string, status: AgentTraceStatus, createdAt =
 
 function pushAgentTrace(traces: AgentTrace[], trace: AgentTrace): AgentTrace[] {
   return [trace, ...traces].slice(0, AGENT_TRACE_LIMIT);
+}
+
+function trimActiveGoal(value: string): string {
+  return value
+    .replace(/^用户刚刚补充：/u, "")
+    .replace(/。用户刚刚补充：.+$/u, "")
+    .replace(/^(请你|麻烦你|帮我|可以帮我|你能不能帮我)/u, "")
+    .replace(/^(把|将)/u, "")
+    .replace(/(这件事|这个目标)?(拆成|分成|列成)?\s*[3三]?\s*(个)?(步骤|小步|步)?/gu, "")
+    .replace(/越顺手越好|越清楚越好|先帮我|今天/g, "")
+    .replace(/[，。,！!？?：:；;\s]+$/gu, "")
+    .trim();
 }
 
 function createAgentSnapshot(currentState: DemoState): AgentObservedSnapshot {
@@ -140,6 +155,28 @@ function isAppFlowDraft(draft: string): boolean {
   return /(专注|奖励|能量|步数|晶石|探索|宠物|图鉴|喂食|地图|银行|对战|商店|陪伴)/u.test(draft);
 }
 
+function inferPlanKindFromDraft(draft: string, nextRoute: RouteKey): PlanKind {
+  const normalizedDraft = draft.trim();
+
+  if (/(奖励|能量|兑换|领奖|晶石|银行|商店|购买|补给)/u.test(normalizedDraft) || nextRoute === "bank" || nextRoute === "shop") {
+    return "resourceTask";
+  }
+
+  if (/(探索|地图|图鉴|喂食|宠物互动|对战)/u.test(normalizedDraft) || nextRoute === "explore" || nextRoute === "pets" || nextRoute === "battle") {
+    return "exploreTask";
+  }
+
+  if (/(专注|番茄|计时|工作|学习|写|改|做方案|整理文档|热身|休息|状态|从哪开始|先做什么)/u.test(normalizedDraft) || nextRoute === "focus") {
+    return "focusTask";
+  }
+
+  if (!isAppFlowDraft(normalizedDraft) && /(拆|步骤|三步|洗澡|遛狗|做饭|收拾|打扫|买|约|拿|取|寄|整理)/u.test(normalizedDraft)) {
+    return "lifeTask";
+  }
+
+  return nextRoute === "companion" ? "lifeTask" : "chatOnly";
+}
+
 function createBattleIntroLog(petName: string): string {
   return `系统派出了企鹅。你派出了${petName}，准备进入演示战斗。`;
 }
@@ -158,6 +195,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
 
   if (currentState.focus.running) {
     return {
+      planKind: "focusTask",
       goalSummary: "把当前这轮专注完整走完",
       steps: ["先把当前专注完成", "去奖励页领取步数能量", "再决定继续探索还是陪伴复盘"],
       recommendedDuration: `${currentState.focus.durationMinutes} 分钟当前节奏`,
@@ -169,6 +207,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
 
   if (claimableEnergy > 0 && (normalizedDraft.includes("奖励") || normalizedDraft.includes("能量") || normalizedDraft.includes("兑换"))) {
     return {
+      planKind: "resourceTask",
       goalSummary: "把奖励闭环讲清楚",
       steps: ["先去奖励页收下步数能量", "按建议兑换一部分晶石", "再带着资源去探索或对战"],
       recommendedDuration: "15 分钟阅读整理",
@@ -180,6 +219,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
 
   if (normalizedDraft.includes("休息") || normalizedDraft.includes("累") || normalizedDraft.includes("热身")) {
     return {
+      planKind: "focusTask",
       goalSummary: "先把状态轻一点地拉起来",
       steps: ["先做一轮 10 分钟快速热身", "去奖励页看一次能量变化", "如果状态起来了，再切 25 分钟深度专注"],
       recommendedDuration: "10 分钟快速热身",
@@ -191,6 +231,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
 
   if (normalizedDraft.includes("探索") || normalizedDraft.includes("宠物") || normalizedDraft.includes("图鉴")) {
     return {
+      planKind: "exploreTask",
       goalSummary: "让陪伴和探索一起接进主线",
       steps: ["先做一轮 25 分钟专注", "再去奖励页领取步数能量", "最后带着陪伴去探索或切换图鉴角色"],
       recommendedDuration: "25 分钟深度专注",
@@ -203,6 +244,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
   if (!isAppFlowDraft(normalizedDraft) && /(拆成\s*[3三]步|分成\s*[3三]步|列出\s*[3三]步|三个步骤|三步来拆|越顺手越好)/u.test(normalizedDraft)) {
     const steps = createTasksFromDraft(normalizedDraft);
     return {
+      planKind: "lifeTask",
       goalSummary: "把这件事拆成三个顺手步骤，让过程更轻松",
       steps,
       recommendedDuration: "照着三步慢慢来",
@@ -213,6 +255,7 @@ function createStructuredPlanFromDraft(draft: string, currentState: DemoState): 
   }
 
   return {
+    planKind: inferPlanKindFromDraft(normalizedDraft, claimableEnergy > 0 ? "bank" : "focus"),
     goalSummary: "把今天的主线讲顺",
     steps: ["先完成一轮 25 分钟专注", "去奖励页领取步数能量", "再决定继续探索还是陪伴复盘"],
     recommendedDuration: "25 分钟深度专注",
@@ -238,6 +281,26 @@ function createJourneyPlanCard(plan: StructuredPlan): AICard {
   };
 }
 
+function extractDurationMinutes(label: string): number {
+  const match = label.match(/(\d+)\s*分钟/u);
+  if (!match) return 25;
+  return Math.max(5, Math.min(60, Number.parseInt(match[1], 10)));
+}
+
+function createFocusBriefFromPlan(plan: StructuredPlan, sourceMessageId?: string): FocusBrief | null {
+  if (plan.planKind === "lifeTask" || plan.planKind === "chatOnly") return null;
+  if (plan.nextRoute !== "focus") return null;
+  const durationMinutes = extractDurationMinutes(plan.recommendedDuration);
+  return {
+    goal: plan.goalSummary,
+    durationLabel: plan.recommendedDuration,
+    durationMinutes,
+    successCriteria: plan.steps[0] ?? "把这一轮目标推进到可以收尾",
+    afterFocusNextStep: plan.steps[1] ?? "去奖励页领取能量",
+    ...(sourceMessageId ? { sourceMessageId } : {}),
+  };
+}
+
 function createFocusRecapCard(source: DemoState["focus"]["source"]): AICard {
   return {
     id: createId("ai"),
@@ -252,6 +315,63 @@ function createFocusRecapCard(source: DemoState["focus"]["source"]): AICard {
     secondaryLabel: "再开一轮",
     secondaryRoute: "focus",
   };
+}
+
+function createFocusRecapCardFromRecap(recap: FocusRecap): AICard {
+  return {
+    id: createId("ai"),
+    type: "focusRecap",
+    title: recap.summary,
+    description: `${recap.completedMeaning} ${recap.nextStep}`,
+    ctaLabel: recap.ctaLabel,
+    ctaRoute: recap.nextRoute,
+    secondaryLabel: "再开一轮",
+    secondaryRoute: "focus",
+  };
+}
+
+function createFocusRecapMessageContent(recap: FocusRecap): string {
+  return `${recap.summary} ${recap.completedMeaning} ${recap.nextStep}`.replace(/\s+/gu, " ").trim();
+}
+
+function createFallbackFocusRecap(currentState: DemoState): FocusRecap {
+  const brief = currentState.activeFocusBrief;
+  const goal = brief?.goal ?? "这轮专注";
+  const hasClaimableEnergy = currentState.steps.some((item) => !item.redeemed);
+  return {
+    summary: "这一轮已经走稳了",
+    completedMeaning: brief
+      ? `你刚刚推进了“${goal}”，这一步已经从想法变成了实际进度。`
+      : "你刚刚完成了一轮专注，晶石和经验已经结算完成。",
+    nextStep: hasClaimableEnergy ? "现在最适合去奖励页把能量接回来。" : "现在可以回到陪伴页继续整理下一步。",
+    nextRoute: hasClaimableEnergy ? "bank" : "companion",
+    ctaLabel: hasClaimableEnergy ? "去领取能量" : "回到陪伴页",
+  };
+}
+
+function createFocusRecapPrompt(currentState: DemoState): string {
+  const latestSession = currentState.sessions[0];
+  const brief = currentState.activeFocusBrief;
+  const claimableEnergy = currentState.steps.filter((item) => !item.redeemed).reduce((sum, item) => sum + item.energyEarned, 0);
+  return [
+    "请复盘这轮刚完成的专注，并给下一步建议。",
+    `本轮目标：${brief?.goal ?? latestSession?.tag ?? "完成一轮专注"}`,
+    `建议时长：${brief?.durationLabel ?? `${latestSession?.duration ?? currentState.focus.durationMinutes} 分钟专注`}`,
+    `完成标准：${brief?.successCriteria ?? "把这一轮目标推进到可以收尾"}`,
+    `实际时长：${latestSession?.duration ?? currentState.focus.durationMinutes} 分钟`,
+    `本轮奖励：${latestSession?.crystalReward ?? currentState.focus.durationMinutes * 3} 晶石，${latestSession?.expReward ?? currentState.focus.durationMinutes * 2} 经验`,
+    `待领取能量：${claimableEnergy}`,
+    "请返回 focusRecap。",
+  ].join("\n");
+}
+
+function presetIdForDuration(currentState: DemoState, durationMinutes: number): string {
+  const exactPreset = currentState.presets.find((preset) => preset.minutes === durationMinutes);
+  if (exactPreset) return exactPreset.id;
+  const nearestPreset = [...currentState.presets].sort((a, b) =>
+    Math.abs(a.minutes - durationMinutes) - Math.abs(b.minutes - durationMinutes),
+  )[0];
+  return nearestPreset?.id ?? currentState.focus.selectedPresetId;
 }
 
 function createResourceAdviceCard(currentState: DemoState): AICard {
@@ -410,7 +530,7 @@ function detectFollowUpCompanionAction(draft: string): CompanionAIAction | null 
     return "tasks";
   }
 
-  if (/^(排一下|安排一下|顺一下|理一下|讲清楚|继续整理|整理一下|继续顺一顺)/u.test(normalized)) {
+  if (/^(排一下|安排一下|顺一下|理一下|讲清楚|继续|继续吧|就按这个来|安排下一步|继续整理|整理一下|继续顺一顺)/u.test(normalized)) {
     return "plan";
   }
 
@@ -466,6 +586,34 @@ function shouldGenerateStructuredReply(draft: string): boolean {
   return /(帮我|整理|拆成|安排|决定|主线|从哪开始|先做什么|怎么接|讲清楚|规划)/u.test(normalized);
 }
 
+function isGoalBearingCompanionDraft(draft: string): boolean {
+  const normalized = draft.trim();
+  const intent = detectLocalCompanionIntent(normalized);
+
+  if (["greeting", "capability", "gratitude"].includes(intent) || isLowSignalCompanionDraft(normalized)) {
+    return false;
+  }
+
+  if (detectExplicitCompanionAction(normalized) || shouldGenerateStructuredReply(normalized)) {
+    return true;
+  }
+
+  return /(今天|我要|我想|需要|准备|计划|帮我|给.+(洗澡|遛|做|买|整理|收拾|打扫)|写|改|做|整理|学习|工作|洗澡|遛狗|做饭|打扫|收拾)/u.test(normalized);
+}
+
+function createActiveGoalFromCompanionResult(draft: string, plan?: StructuredPlan): string {
+  if (plan?.goalSummary && plan.planKind !== "chatOnly" && !/^把这件事|先把这条/u.test(plan.goalSummary)) {
+    return plan.goalSummary.trim();
+  }
+
+  const trimmedDraft = trimActiveGoal(draft);
+  if (trimmedDraft.length >= 2) {
+    return trimmedDraft;
+  }
+
+  return plan?.goalSummary.trim() ?? draft.trim();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -476,6 +624,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isRouteKey(value: unknown): value is RouteKey {
   return typeof value === "string" && ALLOWED_MODEL_ROUTES.includes(value as RouteKey);
+}
+
+function isPlanKind(value: unknown): value is PlanKind {
+  return typeof value === "string" && ["lifeTask", "focusTask", "resourceTask", "exploreTask", "chatOnly"].includes(value);
 }
 
 function isToolName(value: unknown): value is AgentToolName {
@@ -500,6 +652,7 @@ function parseStructuredPlan(value: unknown): StructuredPlan | null {
   }
 
   return {
+    planKind: isPlanKind(value.planKind) ? value.planKind : inferPlanKindFromDraft(value.goalSummary.trim(), value.nextRoute),
     goalSummary: value.goalSummary.trim(),
     steps,
     recommendedDuration: value.recommendedDuration.trim(),
@@ -606,6 +759,54 @@ function parseAgentToolCalls(value: unknown): AgentToolCall[] | undefined {
   return toolCalls.length ? toolCalls : undefined;
 }
 
+function parseFocusBrief(value: unknown): FocusBrief | undefined {
+  if (!isRecord(value)) return undefined;
+  const durationMinutes = typeof value.durationMinutes === "number" && Number.isFinite(value.durationMinutes)
+    ? Math.max(5, Math.min(60, Math.round(value.durationMinutes)))
+    : null;
+
+  if (
+    !isNonEmptyString(value.goal)
+    || !isNonEmptyString(value.durationLabel)
+    || durationMinutes === null
+    || !isNonEmptyString(value.successCriteria)
+    || !isNonEmptyString(value.afterFocusNextStep)
+  ) {
+    return undefined;
+  }
+
+  return {
+    goal: value.goal.trim(),
+    durationLabel: value.durationLabel.trim(),
+    durationMinutes,
+    successCriteria: value.successCriteria.trim(),
+    afterFocusNextStep: value.afterFocusNextStep.trim(),
+    ...(isNonEmptyString(value.sourceMessageId) ? { sourceMessageId: value.sourceMessageId.trim() } : {}),
+  };
+}
+
+function parseFocusRecap(value: unknown): FocusRecap | undefined {
+  if (!isRecord(value)) return undefined;
+
+  if (
+    !isNonEmptyString(value.summary)
+    || !isNonEmptyString(value.completedMeaning)
+    || !isNonEmptyString(value.nextStep)
+    || !isRouteKey(value.nextRoute)
+    || !isNonEmptyString(value.ctaLabel)
+  ) {
+    return undefined;
+  }
+
+  return {
+    summary: value.summary.trim(),
+    completedMeaning: value.completedMeaning.trim(),
+    nextStep: value.nextStep.trim(),
+    nextRoute: value.nextRoute,
+    ctaLabel: value.ctaLabel.trim(),
+  };
+}
+
 function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft: string): CompanionAIResponse | null {
   if (!isRecord(data) || data.source !== "model" || !isNonEmptyString(data.content)) {
     return null;
@@ -613,10 +814,14 @@ function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft:
 
   const structuredPlan = data.structuredPlan ? parseStructuredPlan(data.structuredPlan) : undefined;
   const toolCalls = parseAgentToolCalls(data.toolCalls);
+  const focusBrief = parseFocusBrief(data.focusBrief);
+  const focusRecap = parseFocusRecap(data.focusRecap);
   const baseResponse: CompanionAIResponse = {
     content: data.content.trim(),
     source: "model",
     toolCalls,
+    ...(focusBrief ? { focusBrief } : {}),
+    ...(focusRecap ? { focusRecap } : {}),
   };
 
   if (action === "idea") {
@@ -655,6 +860,10 @@ function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft:
       ? {
         ...structuredPlan,
         nextRoute: !isAppFlowDraft(draft) && structuredPlan.nextRoute === "home" ? "companion" as const : structuredPlan.nextRoute,
+        planKind: inferPlanKindFromDraft(
+          draft,
+          !isAppFlowDraft(draft) && structuredPlan.nextRoute === "home" ? "companion" as const : structuredPlan.nextRoute,
+        ),
       }
       : structuredPlan;
 
@@ -688,6 +897,7 @@ function buildCompanionContext(currentState: DemoState): CompanionAIContext {
       durationMinutes: currentState.focus.durationMinutes,
       elapsedSeconds: getFocusElapsedSeconds(currentState.focus),
     },
+    activeFocusBrief: currentState.activeFocusBrief,
     claimableEnergy,
     wallet: currentState.wallet,
     activePet: {
@@ -792,6 +1002,7 @@ function createFallbackCompanionResult(action: CompanionAIAction, draft: string,
       source: "fallback",
       content: "我把这句话整理成一张可以直接执行的旅程卡。",
       structuredPlan: journeyPlan.structuredPlan,
+      focusBrief: createFocusBriefFromPlan(journeyPlan.structuredPlan) ?? undefined,
       tasks: createTasksFromDraft(draft),
     };
   }
@@ -801,6 +1012,7 @@ function createFallbackCompanionResult(action: CompanionAIAction, draft: string,
       source: "fallback",
       content: "我先把顺序排好，你照着走就能把主线讲清楚。",
       structuredPlan: journeyPlan.structuredPlan,
+      focusBrief: createFocusBriefFromPlan(journeyPlan.structuredPlan) ?? undefined,
     };
   }
 
@@ -848,6 +1060,7 @@ function createFallbackCompanionResult(action: CompanionAIAction, draft: string,
     source: "fallback",
     content: "我先把这句话拆成一条可以直接走的旅程。",
     structuredPlan: journeyPlan.structuredPlan,
+    focusBrief: createFocusBriefFromPlan(journeyPlan.structuredPlan) ?? undefined,
   };
 }
 
@@ -959,6 +1172,10 @@ function inferAgentToolCalls(action: CompanionAIAction, draft: string, currentSt
   }
 
   if (action === "plan" && result.structuredPlan) {
+    if (result.structuredPlan.planKind === "lifeTask" || result.structuredPlan.planKind === "chatOnly") {
+      return [];
+    }
+
     return [{
       name: "setRoute",
       args: { route: result.structuredPlan.nextRoute },
@@ -981,6 +1198,10 @@ function inferAgentToolCalls(action: CompanionAIAction, draft: string, currentSt
   }
 
   if (/先做什么|从哪开始|下一步/u.test(draft)) {
+    if (result.structuredPlan.planKind === "lifeTask" || result.structuredPlan.planKind === "chatOnly") {
+      return [];
+    }
+
     if (result.structuredPlan.nextRoute === "focus" && !currentState.focus.running) {
       return [{
         name: "startFocus",
@@ -1011,8 +1232,12 @@ function inferAgentToolCalls(action: CompanionAIAction, draft: string, currentSt
 }
 
 function normalizeAgentToolCalls(action: CompanionAIAction, draft: string, currentState: DemoState, result: CompanionActionResult): AgentToolCall[] {
-  const directToolCalls = result.toolCalls?.slice(0, 2) ?? [];
-  const inferredToolCalls = inferAgentToolCalls(action, draft, currentState, result).slice(0, 2);
+  const blocksAutomaticTaskCreation = result.structuredPlan?.planKind === "lifeTask";
+  const directToolCalls = (result.toolCalls?.slice(0, 2) ?? [])
+    .filter((toolCall) => !(blocksAutomaticTaskCreation && toolCall.name === "createTasks"));
+  const inferredToolCalls = inferAgentToolCalls(action, draft, currentState, result)
+    .filter((toolCall) => !(blocksAutomaticTaskCreation && toolCall.name === "createTasks"))
+    .slice(0, 2);
 
   if (directToolCalls.length > 0) {
     if (action === "tasks" && !directToolCalls.some((toolCall) => toolCall.name === "createTasks")) {
@@ -1089,6 +1314,8 @@ function loadState(): DemoState {
         ...message,
         petName: inferMessagePetName(message, nextPets, activePet.id),
       })),
+      activeFocusBrief: parsed.activeFocusBrief ?? null,
+      latestFocusRecap: parsed.latestFocusRecap ?? null,
       aiCards: parsed.aiCards ?? seedState.aiCards,
       agent: normalizeAgentState(seedState, parsed.agent ?? seedState.agent),
     };
@@ -1143,6 +1370,54 @@ export function useDemoState() {
     [state.sessions],
   );
 
+  function createPendingToolTraceMessage(toolCall: AgentToolCall, current: DemoState): string {
+    if (toolCall.name === "startFocus") {
+      const duration = typeof toolCall.args?.duration === "number" ? Math.round(toolCall.args.duration) : current.focus.durationMinutes;
+      return `等待你确认开始 ${duration} 分钟专注。`;
+    }
+
+    if (toolCall.name === "claimRecommended") {
+      return "等待你确认去奖励页领取能量。";
+    }
+
+    if (toolCall.name === "setRoute" && isRouteKey(toolCall.args?.route)) {
+      const routeLabelMap: Record<RouteKey, string> = {
+        home: "主页",
+        focus: "专注页",
+        companion: "陪伴页",
+        pets: "宠物页",
+        explore: "探索页",
+        bank: "奖励页",
+        achievements: "成就页",
+        battle: "试炼页",
+        shop: "补给铺",
+      };
+      return `等待你确认前往${routeLabelMap[toolCall.args.route]}。`;
+    }
+
+    return "等待你确认是否继续这一步。";
+  }
+
+  function createPlanEvidenceTrace(plan: StructuredPlan, focusBrief?: FocusBrief | null, goalLabel?: string | null): AgentTrace | null {
+    if (plan.planKind === "lifeTask") {
+      return createAgentTrace(`已把「${goalLabel || trimActiveGoal(plan.goalSummary) || "这件事"}」拆成 3 个顺手步骤。`, "done");
+    }
+
+    if (plan.planKind === "focusTask" || focusBrief) {
+      return createAgentTrace(`已准备好本轮专注任务：${focusBrief?.durationLabel ?? plan.recommendedDuration}。`, "done");
+    }
+
+    if (plan.planKind === "resourceTask") {
+      return createAgentTrace("已整理好奖励和能量的下一步。", "done");
+    }
+
+    if (plan.planKind === "exploreTask") {
+      return createAgentTrace("已整理好探索和陪伴的下一步。", "done");
+    }
+
+    return null;
+  }
+
   function createToolFollowUpTrace(toolCall: AgentToolCall, current: DemoState, createdTaskIds?: string[]): AgentTrace | null {
     if (toolCall.name === "createTasks" && createdTaskIds?.length) {
       return createAgentTrace("下一步已经留在待办里了，照着往下走就行。", "done");
@@ -1194,7 +1469,7 @@ export function useDemoState() {
     if (!skipConfirmation && shouldConfirmToolCall(toolCall)) {
       return {
         nextState: current,
-        trace: createAgentTrace(toolCall.reason, "pending", createdAt),
+        trace: createAgentTrace(createPendingToolTraceMessage(toolCall, current), "pending", createdAt),
         pendingAction: {
           toolCall,
           requestedAt: createdAt,
@@ -1233,7 +1508,7 @@ export function useDemoState() {
           ...current,
           tasks: [...createdTasks, ...current.tasks],
         },
-        trace: createAgentTrace(`已帮你拆出 ${createdTasks.length} 条待办。`, "done", createdAt),
+        trace: createAgentTrace(`已加入 ${createdTasks.length} 条待办。`, "done", createdAt),
         createdTaskIds,
       };
     }
@@ -1252,7 +1527,7 @@ export function useDemoState() {
           ...current,
           route,
         },
-        trace: createAgentTrace(`建议下一步先去${route === "focus" ? "专注页" : route === "bank" ? "奖励页" : route === "explore" ? "探索页" : route === "pets" ? "宠物页" : "陪伴页"}。`, "done", createdAt),
+        trace: createAgentTrace(`已准备跳到${route === "focus" ? "专注页" : route === "bank" ? "奖励页" : route === "explore" ? "探索页" : route === "pets" ? "宠物页" : "陪伴页"}。`, "done", createdAt),
       };
     }
 
@@ -1360,11 +1635,12 @@ export function useDemoState() {
   ): DemoState {
     const createdAt = Date.now();
     const nextMessages = [...current.messages];
-    const shouldReplaceActiveGoal = Boolean(result.structuredPlan)
-      || !isLowSignalCompanionDraft(draft)
-      || detectLocalCompanionIntent(draft) !== "general";
+    const shouldReplaceActiveGoal = Boolean(result.structuredPlan) || isGoalBearingCompanionDraft(draft);
+    const nextActiveGoal = shouldReplaceActiveGoal
+      ? createActiveGoalFromCompanionResult(draft, result.structuredPlan)
+      : current.agent.activeGoal;
     let nextAgent = normalizeAgentState(current, {
-      activeGoal: shouldReplaceActiveGoal ? (result.structuredPlan?.goalSummary ?? draft) : current.agent.activeGoal,
+      activeGoal: nextActiveGoal,
       activePlan: result.structuredPlan ?? current.agent.activePlan,
       pendingAction: null,
       agentStatus: "acting",
@@ -1396,19 +1672,44 @@ export function useDemoState() {
     let nextFocus = current.focus;
     let nextRoute = "companion" as RouteKey;
     const cardsToUpsert: AICard[] = [];
+    const structuredMessageId = createId("msg");
+    const resultFocusBrief = result.structuredPlan?.planKind === "lifeTask" || result.structuredPlan?.planKind === "chatOnly"
+      ? undefined
+      : result.focusBrief;
+    const nextFocusBrief = resultFocusBrief
+      ?? (result.structuredPlan ? createFocusBriefFromPlan(result.structuredPlan, structuredMessageId) : null);
     const normalizedToolCalls = normalizeAgentToolCalls(action, draft, current, result)
       .filter((toolCall) => !(action === "tasks" && toolCall.name === "createTasks"));
 
     if (result.structuredPlan) {
       cardsToUpsert.push(createJourneyPlanCard(result.structuredPlan));
+      const planTrace = createPlanEvidenceTrace(result.structuredPlan, nextFocusBrief, nextActiveGoal);
+      if (planTrace) {
+        nextAgent = normalizeAgentState(current, {
+          ...nextAgent,
+          agentTrace: pushAgentTrace(nextAgent.agentTrace, planTrace),
+        });
+      }
+    }
+
+    if (result.focusRecap) {
+      cardsToUpsert.push(createFocusRecapCardFromRecap(result.focusRecap));
     }
 
     if (result.structuredPlan) {
       if (action === "plan") {
         nextFocus = { ...current.focus, source: "ai" };
       }
+      if (nextFocusBrief && !current.focus.running) {
+        nextFocus = {
+          ...nextFocus,
+          source: "ai",
+          durationMinutes: nextFocusBrief.durationMinutes,
+          selectedPresetId: presetIdForDuration(current, nextFocusBrief.durationMinutes),
+        };
+      }
       nextMessages.push(createPetMessage(current, {
-        id: createId("msg"),
+        id: structuredMessageId,
         type: "structuredPlan",
         content: result.content,
         createdAt,
@@ -1430,6 +1731,8 @@ export function useDemoState() {
       route: nextRoute,
       draft: options.clearDraft ? "" : current.draft,
       focus: nextFocus,
+      activeFocusBrief: nextFocusBrief ? { ...nextFocusBrief, sourceMessageId: nextFocusBrief.sourceMessageId ?? structuredMessageId } : current.activeFocusBrief,
+      latestFocusRecap: result.focusRecap ?? current.latestFocusRecap,
       tasks: nextTasks,
       notes: nextNotes,
       messages: nextMessages,
@@ -1466,7 +1769,7 @@ export function useDemoState() {
       messages: nextMessages,
       agent: normalizeAgentState(workingState, {
         ...nextAgent,
-        activeGoal: shouldReplaceActiveGoal ? (result.structuredPlan?.goalSummary ?? draft) : nextAgent.activeGoal,
+        activeGoal: nextActiveGoal,
         activePlan: result.structuredPlan ?? nextAgent.activePlan,
         agentStatus: nextAgent.pendingAction ? "awaiting_confirmation" : "done",
         lastObservedSnapshot: createAgentSnapshot(workingState),
@@ -1522,7 +1825,7 @@ export function useDemoState() {
         messages: nextMessages,
         agent: normalizeAgentState(current, {
           agentStatus: "thinking",
-          activeGoal: current.agent.activeGoal ?? resolvedRequest.requestDraft,
+          activeGoal: current.agent.activeGoal ?? (isGoalBearingCompanionDraft(resolvedRequest.requestDraft) ? trimActiveGoal(resolvedRequest.requestDraft) : null),
           pendingAction: null,
         }),
       };
@@ -1567,6 +1870,15 @@ export function useDemoState() {
     userMessageContent: string;
   } {
     if (requestedAction !== "message") {
+      const baseGoal = getLatestMeaningfulCompanionGoal(currentState);
+      if (baseGoal && (isLowSignalCompanionDraft(draft) || detectFollowUpCompanionAction(draft))) {
+        return {
+          action: requestedAction,
+          requestDraft: `${baseGoal}。用户刚刚补充：${draft}`,
+          userMessageContent: draft,
+        };
+      }
+
       return {
         action: requestedAction,
         requestDraft: draft,
@@ -1731,6 +2043,48 @@ export function useDemoState() {
     });
   }
 
+  async function refreshFocusRecap(settledState: DemoState): Promise<void> {
+    const fallbackRecap = createFallbackFocusRecap(settledState);
+    try {
+      const result = await requestCompanionModel("message", createFocusRecapPrompt(settledState), settledState);
+      const nextRecap = result.focusRecap ?? fallbackRecap;
+      const aiSource = result.focusRecap ? "model" : "fallback";
+      setState((current) =>
+        finalizeState({
+          ...current,
+          latestFocusRecap: nextRecap,
+          messages: [
+            ...current.messages,
+            createPetMessage(current, {
+              id: createId("msg"),
+              type: "recap",
+              content: createFocusRecapMessageContent(nextRecap),
+              createdAt: Date.now(),
+              aiSource,
+            }),
+          ],
+        }, [createFocusRecapCardFromRecap(nextRecap)]),
+      );
+    } catch {
+      setState((current) =>
+        finalizeState({
+          ...current,
+          latestFocusRecap: fallbackRecap,
+          messages: [
+            ...current.messages,
+            createPetMessage(current, {
+              id: createId("msg"),
+              type: "recap",
+              content: createFocusRecapMessageContent(fallbackRecap),
+              createdAt: Date.now(),
+              aiSource: "fallback",
+            }),
+          ],
+        }, [createFocusRecapCardFromRecap(fallbackRecap)]),
+      );
+    }
+  }
+
   function startFocus(): void {
     setState((current) => {
       if (current.focus.running) {
@@ -1789,17 +2143,23 @@ export function useDemoState() {
   }
 
   function finishFocus(): void {
+    let settledState: DemoState | null = null;
     setState((current) => {
       if (!current.focus.running || !canClaimFocusReward(current.focus)) {
         return current;
       }
 
-      return settleCompletedFocus(
+      settledState = settleCompletedFocus(
         current,
         current.focus.source,
         "这轮奖励已经拿稳了。下一步先去奖励页领取步数能量，再决定要不要继续探索。",
       );
+      return settledState;
     });
+
+    if (settledState) {
+      void refreshFocusRecap(settledState);
+    }
   }
 
   function skipFocusForDemo(): void {
@@ -1983,6 +2343,23 @@ export function useDemoState() {
           pendingAction: null,
           agentTrace: [],
           lastObservedSnapshot: null,
+        }),
+      });
+    });
+  }
+
+  function clearActiveGoal(): void {
+    setState((current) => {
+      if (!current.agent.activeGoal && !current.agent.activePlan) return current;
+
+      return finalizeState({
+        ...current,
+        agent: normalizeAgentState(current, {
+          activeGoal: null,
+          activePlan: null,
+          pendingAction: null,
+          agentStatus: "idle",
+          lastObservedSnapshot: createAgentSnapshot(current),
         }),
       });
     });
@@ -2332,6 +2709,7 @@ export function useDemoState() {
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,
+    clearActiveGoal,
     askPetForAdvice,
     selectPet,
     feedPet,

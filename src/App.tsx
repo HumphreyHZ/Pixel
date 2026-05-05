@@ -4,7 +4,7 @@ import { useState } from "react";
 import { PixelPet } from "./components/PixelPet";
 import { mainRoutes, routeLabels } from "./data/seed";
 import { useDemoState } from "./hooks/useDemoState";
-import type { AICard, CompanionMessage, FocusPreset, RouteKey, StepLedger, StructuredPlan, TaskItem } from "./types";
+import type { AICard, AgentToolCall, CompanionMessage, FocusBrief, FocusPreset, RouteKey, StepLedger, StructuredPlan, TaskItem } from "./types";
 
 const presetToneMap: Record<FocusPreset["tone"], string> = {
   sky: "bg-sky/55",
@@ -203,25 +203,40 @@ function PromptChip({
 }
 
 function planPrimaryLabel(plan: StructuredPlan, isExecuting = false, isExecutionComplete = false, executionStepIndex?: number): string {
-  if (plan.nextRoute === "companion") {
+  if (plan.planKind === "lifeTask" || plan.nextRoute === "companion") {
     if (!isExecuting) return "开始第一步";
     if (isExecutionComplete) return "这三步已走完";
     const stepNumber = Math.min((executionStepIndex ?? 0) + 1, plan.steps.length);
     return `完成第 ${stepNumber} 步`;
   }
 
-  if (plan.nextRoute === "focus") {
+  if (plan.planKind === "focusTask" || plan.nextRoute === "focus") {
     if (/热身/u.test(plan.recommendedDuration)) {
       return `先热身 ${plan.recommendedDuration.replace(/\s+/g, "")}`;
     }
     return `先专注 ${plan.recommendedDuration.replace(/\s+/g, "")}`;
   }
 
-  if (plan.nextRoute === "bank") return "去领取能量";
-  if (plan.nextRoute === "explore") return "去探索";
+  if (plan.planKind === "resourceTask" || plan.nextRoute === "bank") return "去领取能量";
+  if (plan.planKind === "exploreTask" || plan.nextRoute === "explore") return "去探索";
   if (plan.nextRoute === "pets") return "去看看陪伴";
 
   return plan.nextAction;
+}
+
+function planEyebrow(plan: StructuredPlan): string {
+  if (plan.planKind === "lifeTask") return "生活小步骤";
+  if (plan.planKind === "focusTask") return "专注任务卡";
+  if (plan.planKind === "resourceTask") return "资源建议";
+  if (plan.planKind === "exploreTask") return "探索路线";
+  return "陪伴整理";
+}
+
+function planStepsTitle(plan: StructuredPlan): string {
+  if (plan.planKind === "lifeTask") return "三步拆分";
+  if (plan.planKind === "resourceTask") return "资源顺序";
+  if (plan.planKind === "exploreTask") return "推进顺序";
+  return "建议顺序";
 }
 
 function AiModule({
@@ -293,7 +308,7 @@ function StructuredPlanMessage({
   onAddToTasks: () => void;
   onSecondary: () => void;
 }) {
-  const isCompanionExecutionPlan = plan.nextRoute === "companion";
+  const isCompanionExecutionPlan = plan.planKind === "lifeTask" || plan.nextRoute === "companion";
   const isExecuting = isCompanionExecutionPlan && typeof executionStepIndex === "number";
   const isExecutionComplete = isExecuting && executionStepIndex >= plan.steps.length;
   const activeStepIndex = isExecutionComplete
@@ -305,7 +320,7 @@ function StructuredPlanMessage({
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
-        <p className="ai-eyebrow">陪伴整理</p>
+        <p className="ai-eyebrow">{planEyebrow(plan)}</p>
         <span className="story-chip">{plan.recommendedDuration}</span>
       </div>
       <p className="mt-3 text-sm leading-6 text-ink">{content}</p>
@@ -315,7 +330,7 @@ function StructuredPlanMessage({
           <p className="mt-2 text-sm leading-6 text-ink">{plan.goalSummary}</p>
         </div>
         <div className="border-t border-black/[0.08] pt-4">
-          <p className="ai-mini-title">建议顺序</p>
+          <p className="ai-mini-title">{planStepsTitle(plan)}</p>
           <div className="mt-2 space-y-2">
             {plan.steps.map((step, index) => (
               <div
@@ -388,6 +403,27 @@ function aiSourceLabel(source?: "model" | "fallback"): string | null {
   if (source === "model") return "DeepSeek";
   if (source === "fallback") return "演示回退";
   return null;
+}
+
+function pendingAgentActionCopy(toolCall: AgentToolCall, focusDurationMinutes: number): string {
+  if (toolCall.name === "startFocus") {
+    const duration = typeof toolCall.args?.duration === "number" ? Math.round(toolCall.args.duration) : focusDurationMinutes;
+    return `我已经准备好 ${duration} 分钟专注，点一下就正式开始。`;
+  }
+
+  if (toolCall.name === "claimRecommended") {
+    return "我建议先去奖励页把能量接回来，确认后再带你过去。";
+  }
+
+  if (toolCall.name === "setRoute") {
+    const route = toolCall.args?.route;
+    if (route === "focus") return "下一步更适合进入专注页，确认后我会带你过去。";
+    if (route === "bank") return "下一步更适合去奖励页，确认后我会带你过去。";
+    if (route === "explore") return "下一步可以去探索页，确认后我会带你过去。";
+    if (route === "pets") return "下一步可以去看看当前陪伴，确认后我会带你过去。";
+  }
+
+  return "这一步会改变当前流程，确认后我再继续。";
 }
 
 function companionThinkingCopy(
@@ -518,6 +554,7 @@ export default function App() {
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,
+    clearActiveGoal,
     askPetForAdvice,
     selectPet,
     feedPet,
@@ -538,6 +575,11 @@ export default function App() {
     [state.messages],
   );
   const recentAgentTrace = useMemo(() => state.agent.agentTrace.slice(0, 4), [state.agent.agentTrace]);
+  const activeGoalLabel = useMemo(() => {
+    const label = state.agent.activeGoal?.trim() ?? "";
+    if (/^(你好|您好|嗨|哈喽|hi|hello|谢谢|好的|收到)[!！。.？? ]*$/iu.test(label)) return "";
+    return label;
+  }, [state.agent.activeGoal]);
   const visibleNotes = useMemo(
     () => (showAllNotes ? state.notes : state.notes.slice(0, 2)),
     [showAllNotes, state.notes],
@@ -663,10 +705,17 @@ export default function App() {
 
   const homePrimaryLabel = state.focus.running ? "继续当前专注" : claimableEnergy > 0 ? "领取步数能量" : "开始本轮专注";
   const homeSecondaryLabel = state.focus.running ? "去陪伴页看任务" : claimableEnergy > 0 ? "再开下一轮专注" : "让陪伴帮我整理主线";
-  const companionFocusPlan = useMemo(() => {
+  const companionFocusBrief = useMemo<FocusBrief | null>(() => {
+    if (state.activeFocusBrief) return state.activeFocusBrief;
     if (state.agent.activePlan?.nextRoute !== "focus") return null;
-    return state.agent.activePlan;
-  }, [state.agent.activePlan]);
+    return {
+      goal: state.agent.activePlan.goalSummary,
+      durationLabel: state.agent.activePlan.recommendedDuration,
+      durationMinutes: Number.parseInt(state.agent.activePlan.recommendedDuration.match(/(\d+)/u)?.[1] ?? "25", 10),
+      successCriteria: state.agent.activePlan.steps[0] ?? "把这一轮目标推进到可以收尾",
+      afterFocusNextStep: state.agent.activePlan.steps[1] ?? "去奖励页领取能量",
+    };
+  }, [state.activeFocusBrief, state.agent.activePlan]);
   const focusRuleCopy = !state.focus.running
     ? "倒计时模式会在归零后自动结算；正计时达到目标时长后，才会开放领奖按钮。需要快速录屏或测试时，可以使用演示跳过。"
     : state.focus.mode === "pomodoro"
@@ -917,13 +966,14 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  {companionFocusPlan ? (
+                  {companionFocusBrief ? (
                     <div className="note-strip">
-                      <p className="story-kicker !text-[10px]">来自陪伴页</p>
-                      <p className="mt-3 text-sm font-semibold leading-6 text-ink">{companionFocusPlan.goalSummary}</p>
+                      <p className="story-kicker !text-[10px]">本轮任务卡</p>
+                      <p className="mt-3 text-sm font-semibold leading-6 text-ink">{companionFocusBrief.goal}</p>
                       <div className="mt-3 space-y-2 text-sm leading-6 text-mist">
-                        <p>这轮建议：{companionFocusPlan.recommendedDuration}</p>
-                        <p>完成后下一步：{companionFocusPlan.steps[1] ?? "去奖励页领取能量"}</p>
+                        <p>建议时长：{companionFocusBrief.durationLabel}</p>
+                        <p>完成标准：{companionFocusBrief.successCriteria}</p>
+                        <p>完成后：{companionFocusBrief.afterFocusNextStep}</p>
                       </div>
                     </div>
                   ) : null}
@@ -1103,6 +1153,25 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+                {activeGoalLabel ? (
+                  <div className="note-strip mt-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="ai-eyebrow">正在陪你推进</p>
+                        <p className="mt-2 text-sm font-semibold leading-6 text-ink">{activeGoalLabel}</p>
+                        <p className="mt-1 text-sm leading-6 text-mist">后面只说“继续”“拆吧”或“安排一下”，我会沿着这个目标接着整理。</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="story-button-secondary w-auto px-3 py-2 text-xs"
+                        disabled={companionLoading}
+                        onClick={clearActiveGoal}
+                      >
+                        清除目标
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
                 {aiErrorMode ? (
                   <div className="note-strip mt-4">
                     <p className="text-sm font-semibold text-ink">当前已切回演示整理模式。</p>
@@ -1114,13 +1183,13 @@ export default function App() {
               </section>
 
               <section className="section-slab">
-                <SectionTitle eyebrow="行动轨迹" title="陪伴已经替你推进了哪些动作" caption="这里只展示看得见的行动证据，不展示内部推理。" />
+                <SectionTitle eyebrow="陪伴做了这些" title="把整理动作留下证据" caption="这里只展示它帮你准备、加入或等待确认的动作，方便你看见刚刚推进了什么。" />
                 {state.agent.pendingAction ? (
                   <div className="note-strip mb-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold text-ink">当前这一步正在等你确认</p>
-                        <p className="mt-2 text-sm leading-6 text-mist">{state.agent.pendingAction.toolCall.reason}</p>
+                        <p className="mt-2 text-sm leading-6 text-mist">{pendingAgentActionCopy(state.agent.pendingAction.toolCall, state.focus.durationMinutes)}</p>
                       </div>
                       <span className={`story-chip ${agentTraceStatusClass("pending")}`}>{agentTraceStatusLabel("pending")}</span>
                     </div>
@@ -1189,7 +1258,7 @@ export default function App() {
                               plan={message.structuredPlan}
                               executionStepIndex={companionExecutionSteps[message.id]}
                               onPrimary={() => {
-                                if (message.structuredPlan?.nextRoute === "companion") {
+                                if (message.structuredPlan?.planKind === "lifeTask" || message.structuredPlan?.nextRoute === "companion") {
                                   startCompanionExecution(message.id);
                                   return;
                                 }

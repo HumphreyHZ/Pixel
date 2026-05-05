@@ -19,6 +19,7 @@ export type CompanionAIAction = "message" | "tasks" | "plan" | "idea";
 export type AgentStatus = "idle" | "thinking" | "awaiting_confirmation" | "acting" | "done" | "blocked";
 export type AgentTraceStatus = "done" | "pending" | "skipped" | "failed";
 export type AgentToolName = "createTasks" | "setRoute" | "startFocus" | "createIdea" | "selectPet" | "claimRecommended" | "noop";
+export type PlanKind = "lifeTask" | "focusTask" | "resourceTask" | "exploreTask" | "chatOnly";
 
 export interface Wallet {
   crystal: number;
@@ -93,12 +94,30 @@ export interface CompanionMessage {
 }
 
 export interface StructuredPlan {
+  planKind: PlanKind;
   goalSummary: string;
   steps: string[];
   recommendedDuration: string;
   nextRoute: RouteKey;
   nextAction: string;
   why: string;
+}
+
+export interface FocusBrief {
+  goal: string;
+  durationLabel: string;
+  durationMinutes: number;
+  successCriteria: string;
+  afterFocusNextStep: string;
+  sourceMessageId?: string;
+}
+
+export interface FocusRecap {
+  summary: string;
+  completedMeaning: string;
+  nextStep: string;
+  nextRoute: RouteKey;
+  ctaLabel: string;
 }
 
 export interface AgentToolCall {
@@ -183,6 +202,7 @@ export interface CompanionAIContext {
     durationMinutes: number;
     elapsedSeconds: number;
   };
+  activeFocusBrief?: FocusBrief | null;
   claimableEnergy: number;
   wallet: Wallet;
   activePet: Pick<Pet, "id" | "name" | "mood" | "affection" | "level" | "activeSkin">;
@@ -203,6 +223,8 @@ export interface CompanionAIRequest {
 export interface CompanionAIResponse {
   content: string;
   structuredPlan?: StructuredPlan;
+  focusBrief?: FocusBrief;
+  focusRecap?: FocusRecap;
   toolCalls?: AgentToolCall[];
   tasks?: string[];
   note?: {
@@ -228,6 +250,8 @@ export interface DemoState {
   wallet: Wallet;
   selectedPetId: string;
   focus: FocusState;
+  activeFocusBrief: FocusBrief | null;
+  latestFocusRecap: FocusRecap | null;
   draft: string;
   pets: Pet[];
   presets: FocusPreset[];

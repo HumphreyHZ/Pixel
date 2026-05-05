@@ -26,6 +26,8 @@ export const seedState: DemoState = {
     durationMinutes: 25,
     source: "manual",
   },
+  activeFocusBrief: null,
+  latestFocusRecap: null,
   draft: "我想先完成一轮 25 分钟专注，再去奖励页领取步数能量，最后带绵羊去探索晨露草坪。",
   pets: [
     { id: "sheep", name: "绵羊", species: "sheep", rarity: "N", level: 12, exp: 36, mood: 78, affection: 44, activeSkin: "默认毛绒", unlocked: true, active: true },
@@ -60,6 +62,7 @@ export const seedState: DemoState = {
       createdAt: Date.now() - 1000 * 60 * 18,
       petName: "绵羊",
       structuredPlan: {
+        planKind: "focusTask",
         goalSummary: "把今天的主线讲顺",
         steps: ["先专注 25 分钟", "去奖励页领取步数能量", "再决定探索或陪伴复盘"],
         recommendedDuration: "25 分钟深度专注",

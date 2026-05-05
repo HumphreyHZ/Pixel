@@ -7,7 +7,10 @@ import type {
   CompanionAIContext,
   CompanionAIRequest,
   CompanionAIResponse,
+  FocusBrief,
+  FocusRecap,
   MessageType,
+  PlanKind,
   RouteKey,
   StructuredPlan,
 } from "../src/types";
@@ -20,7 +23,7 @@ const ALLOWED_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explo
 const ALLOWED_MESSAGE_TYPES: MessageType[] = ["text", "taskCard", "focusPlan", "reward", "recap", "imageCard", "systemEvent", "structuredPlan"];
 const ALLOWED_TOOL_NAMES: AgentToolName[] = ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"];
 let localEnvCache: Record<string, string> | null = null;
-type DraftIntent = "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "distracted" | "general";
+type DraftIntent = "story" | "start" | "reward" | "rest" | "explore" | "recap" | "greeting" | "capability" | "gratitude" | "distracted" | "general";
 
 function isTaskOrientedIntent(intent: DraftIntent): boolean {
   return ["story", "start", "reward", "rest", "explore"].includes(intent);
@@ -38,8 +41,34 @@ function isRouteKey(value: unknown): value is RouteKey {
   return typeof value === "string" && ALLOWED_ROUTES.includes(value as RouteKey);
 }
 
+function isPlanKind(value: unknown): value is PlanKind {
+  return typeof value === "string" && ["lifeTask", "focusTask", "resourceTask", "exploreTask", "chatOnly"].includes(value);
+}
+
 function isMessageType(value: unknown): value is MessageType {
   return typeof value === "string" && ALLOWED_MESSAGE_TYPES.includes(value as MessageType);
+}
+
+function inferPlanKindFromDraft(draft: string, nextRoute: RouteKey): PlanKind {
+  const normalizedDraft = draft.trim();
+
+  if (/(奖励|能量|兑换|领奖|晶石|银行|商店|购买|补给)/u.test(normalizedDraft) || nextRoute === "bank" || nextRoute === "shop") {
+    return "resourceTask";
+  }
+
+  if (/(探索|地图|图鉴|喂食|宠物互动|对战)/u.test(normalizedDraft) || nextRoute === "explore" || nextRoute === "pets" || nextRoute === "battle") {
+    return "exploreTask";
+  }
+
+  if (/(专注|番茄|计时|工作|学习|写|改|做方案|整理文档|热身|休息|状态|从哪开始|先做什么)/u.test(normalizedDraft) || nextRoute === "focus") {
+    return "focusTask";
+  }
+
+  if (!isCompanionFlowDraft(normalizedDraft) && /(拆|步骤|三步|洗澡|遛狗|做饭|收拾|打扫|买|约|拿|取|寄|整理)/u.test(normalizedDraft)) {
+    return "lifeTask";
+  }
+
+  return nextRoute === "companion" ? "lifeTask" : "chatOnly";
 }
 
 function isToolName(value: unknown): value is AgentToolName {
@@ -64,12 +93,61 @@ function parseStructuredPlan(value: unknown): StructuredPlan | null {
   }
 
   return {
+    planKind: isPlanKind(value.planKind) ? value.planKind : inferPlanKindFromDraft(value.goalSummary.trim(), value.nextRoute),
     goalSummary: value.goalSummary.trim(),
     steps,
     recommendedDuration: value.recommendedDuration.trim(),
     nextRoute: value.nextRoute,
     nextAction: value.nextAction.trim(),
     why: value.why.trim(),
+  };
+}
+
+function parseFocusBrief(value: unknown): FocusBrief | null {
+  if (!isRecord(value)) return null;
+  const durationMinutes = typeof value.durationMinutes === "number" && Number.isFinite(value.durationMinutes)
+    ? Math.max(5, Math.min(60, Math.round(value.durationMinutes)))
+    : null;
+
+  if (
+    !isNonEmptyString(value.goal)
+    || !isNonEmptyString(value.durationLabel)
+    || durationMinutes === null
+    || !isNonEmptyString(value.successCriteria)
+    || !isNonEmptyString(value.afterFocusNextStep)
+  ) {
+    return null;
+  }
+
+  return {
+    goal: value.goal.trim(),
+    durationLabel: value.durationLabel.trim(),
+    durationMinutes,
+    successCriteria: value.successCriteria.trim(),
+    afterFocusNextStep: value.afterFocusNextStep.trim(),
+    ...(isNonEmptyString(value.sourceMessageId) ? { sourceMessageId: value.sourceMessageId.trim() } : {}),
+  };
+}
+
+function parseFocusRecap(value: unknown): FocusRecap | null {
+  if (!isRecord(value)) return null;
+
+  if (
+    !isNonEmptyString(value.summary)
+    || !isNonEmptyString(value.completedMeaning)
+    || !isNonEmptyString(value.nextStep)
+    || !isRouteKey(value.nextRoute)
+    || !isNonEmptyString(value.ctaLabel)
+  ) {
+    return null;
+  }
+
+  return {
+    summary: value.summary.trim(),
+    completedMeaning: value.completedMeaning.trim(),
+    nextStep: value.nextStep.trim(),
+    nextRoute: value.nextRoute,
+    ctaLabel: value.ctaLabel.trim(),
   };
 }
 
@@ -124,6 +202,7 @@ function parseContext(value: unknown): CompanionAIContext | null {
       durationMinutes: value.focus.durationMinutes,
       elapsedSeconds: value.focus.elapsedSeconds,
     },
+    activeFocusBrief: parseFocusBrief(value.activeFocusBrief) ?? null,
     claimableEnergy: value.claimableEnergy,
     wallet: {
       crystal: value.wallet.crystal,
@@ -304,6 +383,7 @@ function normalizeStructuredPlanForDraft(
 
   return {
     ...plan,
+    planKind: inferPlanKindFromDraft(draft, nextRoute),
     nextRoute,
     nextAction,
     why,
@@ -314,6 +394,7 @@ function buildFallbackStructuredPlan(draft: string, steps: string[]): Structured
   const safeSteps = steps.length === 3 ? steps : inferTaskTitlesFromDraft(draft);
 
   return {
+    planKind: inferPlanKindFromDraft(draft, !isCompanionFlowDraft(draft) ? "companion" : "focus"),
     goalSummary: !isCompanionFlowDraft(draft)
       ? "把这件事拆成三个顺手步骤，让过程更轻松"
       : "先把这条主线拆顺，再决定下一步",
@@ -355,18 +436,16 @@ function parseModelResult(value: unknown, action: CompanionAIAction): CompanionA
 
     const toolCalls = isRecord(value) ? parseToolCalls(value.toolCalls) : undefined;
     const structuredPlan = isRecord(value) && value.structuredPlan ? parseStructuredPlan(value.structuredPlan) : undefined;
-    return structuredPlan
-      ? {
-          content,
-          source: "model",
-          toolCalls,
-          structuredPlan,
-        }
-      : {
-          content,
-          source: "model",
-          toolCalls,
-        };
+    const focusBrief = isRecord(value) && value.focusBrief ? parseFocusBrief(value.focusBrief) : undefined;
+    const focusRecap = isRecord(value) && value.focusRecap ? parseFocusRecap(value.focusRecap) : undefined;
+    return {
+      content,
+      source: "model",
+      toolCalls,
+      ...(structuredPlan ? { structuredPlan } : {}),
+      ...(focusBrief ? { focusBrief } : {}),
+      ...(focusRecap ? { focusRecap } : {}),
+    };
   }
 
   if (!isRecord(value) || !isNonEmptyString(value.content)) {
@@ -377,6 +456,8 @@ function parseModelResult(value: unknown, action: CompanionAIAction): CompanionA
     content: value.content.trim(),
     source: "model",
     toolCalls: parseToolCalls(value.toolCalls),
+    focusBrief: value.focusBrief ? parseFocusBrief(value.focusBrief) ?? undefined : undefined,
+    focusRecap: value.focusRecap ? parseFocusRecap(value.focusRecap) ?? undefined : undefined,
   };
 
   if (action === "idea") {
@@ -446,6 +527,10 @@ function detectDraftIntent(draft: string): DraftIntent {
 
   if (/(走神|心不在焉|静不下心|注意力不集中|总想分心)/u.test(normalized)) {
     return "distracted";
+  }
+
+  if (/(复盘|总结|刚完成|完成了一轮|专注结束|这一轮之后|这轮之后)/u.test(normalized)) {
+    return "recap";
   }
 
   if (/(主线|讲清楚|闭环|怎么接|串起来)/u.test(normalized)) {
@@ -624,6 +709,10 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
     "toolCalls 最多 2 个。只有真的能帮助用户推进当前目标时，才返回 toolCalls，不要为了显得像 Agent 而硬凑动作。",
     "可用工具只有：createTasks、setRoute、startFocus、createIdea、selectPet、claimRecommended、noop。",
     "低风险动作可以 requiresConfirmation=false；startFocus、claimRecommended，以及会明显打断当前流程的 setRoute 要 requiresConfirmation=true。",
+    "当用户的目标适合先进入专注页时，可以返回 focusBrief。focusBrief 要说明本轮目标、建议时长、完成标准和完成后下一步。",
+    "当用户在请求专注后复盘，或上下文说明刚完成一轮专注时，可以返回 focusRecap。focusRecap 要说明刚推进了什么、这轮的意义和下一步。",
+    "structuredPlan 必须带 planKind，用来区分 lifeTask、focusTask、resourceTask、exploreTask、chatOnly。",
+    "现实生活里的三步小事用 lifeTask；需要进入计时专注的脑力任务用 focusTask；奖励、能量、晶石用 resourceTask；宠物、地图、探索用 exploreTask。",
     `nextRoute 只能从这些值里选择：${ALLOWED_ROUTES.join(", ")}。`,
     "如果返回 structuredPlan，steps 必须正好 3 条，每条都是清晰、可执行的中文短句。",
     "content 写 1 到 3 句中文，像宠物在温柔地接住用户并推动下一步。",
@@ -636,6 +725,7 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
     capability: "用户现在在问你能做什么。请只用 2 句以内说明你可以帮他拆顺序、判断下一步、把专注和奖励接进主线。不要输出 structuredPlan，不要立刻替他排计划。",
     gratitude: "用户现在是在表达感谢或简单确认。请只做简短回应，不要输出 structuredPlan。",
     distracted: "用户是在说自己有点走神或分心。请先接住这个状态，给一个轻一点的回应，不要立刻生成计划，也不要机械地问从哪里开始。",
+    recap: "用户是在请求专注后的复盘。请结合 context.activeFocusBrief、focus、奖励状态和当前陪伴，生成一段短复盘，并附带 focusRecap。",
     story: "用户是在明确请求你帮他理清主线。请给更清楚的闭环表达，必要时附带 structuredPlan。",
     start: "用户是在问现在该从哪一步开始。请优先给一个具体起点，而不是把整条流程都重讲一遍；必要时附带 structuredPlan。",
     reward: "用户重点在奖励和能量怎么接进主线。请先回答这个问题本身；只有在确实需要时才附带 structuredPlan。",
@@ -645,13 +735,15 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
   };
 
   const messageShape = isTaskOrientedIntent(intent)
-    ? `返回 JSON 结构：{"content":"..."}，或 {"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}。只有当用户明确在请求你整理主线、拆步骤、决定下一步时，才附带 structuredPlan；只有当真的能推进一步时，才附带 toolCalls。`
+    ? `返回 JSON 结构：{"content":"..."}，或 {"content":"...","structuredPlan":{"planKind":"lifeTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."},"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}。只有当用户明确在请求你整理主线、拆步骤、决定下一步时，才附带 structuredPlan；只有当真的能推进一步时，才附带 toolCalls；只有当下一步适合专注页时，才附带 focusBrief。`
     : `返回 JSON 结构：{"content":"..."}，或 {"content":"...","toolCalls":[{"name":"setRoute","args":{"route":"companion"},"requiresConfirmation":false,"reason":"..."}]}。普通聊天以自然文本为主，不要为了表现像 Agent 而硬凑动作。`;
 
   const actionPromptMap: Record<CompanionAIAction, string> = {
-    message: messageShape,
-    plan: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"toolCalls":[{"name":"setRoute","args":{"route":"focus"},"requiresConfirmation":false,"reason":"..."}]}`,
-    tasks: `返回 JSON 结构：{"content":"...","structuredPlan":{"goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"tasks":["...","...","..."],"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}`,
+    message: intent === "recap"
+      ? `返回 JSON 结构：{"content":"...","focusRecap":{"summary":"...","completedMeaning":"...","nextStep":"...","nextRoute":"bank","ctaLabel":"去领取能量"}}。nextRoute 只能使用允许值。`
+      : messageShape,
+    plan: `返回 JSON 结构：{"content":"...","structuredPlan":{"planKind":"focusTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."},"toolCalls":[{"name":"setRoute","args":{"route":"focus"},"requiresConfirmation":false,"reason":"..."}]}`,
+    tasks: `返回 JSON 结构：{"content":"...","structuredPlan":{"planKind":"lifeTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"tasks":["...","...","..."],"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}`,
     idea: `返回 JSON 结构：{"content":"...","note":{"title":"...","body":"..."},"quoteRef":"...","toolCalls":[{"name":"createIdea","args":{"title":"...","body":"...","quoteRef":"..."},"requiresConfirmation":false,"reason":"..."}]}`,
   };
 
@@ -678,6 +770,45 @@ function normalizeParsedResultForDraft(payload: CompanionAIRequest, parsed: Comp
             lifePetLabel,
           },
         )
+      : undefined,
+    focusBrief: parsed.focusBrief
+      ? {
+          ...parsed.focusBrief,
+          goal: polishCompanionCopy(parsed.focusBrief.goal, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+          durationLabel: parsed.focusBrief.durationLabel.replace(/(\d+)\s*分钟/u, "$1 分钟"),
+          successCriteria: polishCompanionCopy(parsed.focusBrief.successCriteria, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+          afterFocusNextStep: polishCompanionCopy(parsed.focusBrief.afterFocusNextStep, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+        }
+      : undefined,
+    focusRecap: parsed.focusRecap
+      ? {
+          ...parsed.focusRecap,
+          summary: polishCompanionCopy(parsed.focusRecap.summary, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+          completedMeaning: polishCompanionCopy(parsed.focusRecap.completedMeaning, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+          nextStep: polishCompanionCopy(parsed.focusRecap.nextStep, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+          ctaLabel: polishCompanionCopy(parsed.focusRecap.ctaLabel, payload.context.activePet.name, {
+            avoidActivePetBinding,
+            lifePetLabel,
+          }),
+        }
       : undefined,
     tasks,
   };

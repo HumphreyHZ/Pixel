@@ -1087,7 +1087,7 @@ export default function App() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <p className="companion-group-title">可以直接这样说</p>
-                      <p className="mt-1 text-xs leading-5 text-mist">点一句，我会先带进输入区。你也可以顺手改成更像你自己的说法。</p>
+                      <p className="mt-1 text-xs leading-5 text-mist">点一句带进输入区，也可以改成更像你自己的说法。</p>
                     </div>
                     {selectedPrompt ? <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">已带入</span> : null}
                   </div>

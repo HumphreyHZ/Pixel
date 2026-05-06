@@ -239,6 +239,22 @@ function planStepsTitle(plan: StructuredPlan): string {
   return "建议顺序";
 }
 
+function activeGoalProgressCopy(plan: StructuredPlan | null | undefined, stepIndex?: number): string {
+  if (!plan) return "我会沿着这个目标继续接住后面的短指令。";
+
+  if (plan.planKind === "lifeTask") {
+    if (typeof stepIndex !== "number") return "三步已经拆好，下一步可以从第一步开始。";
+    if (stepIndex >= plan.steps.length) return "三步都已经走完，可以标记完成。";
+    return `当前第 ${stepIndex + 1}/${plan.steps.length} 步：${plan.steps[stepIndex]}`;
+  }
+
+  if (plan.planKind === "focusTask") return `已准备专注任务：${plan.recommendedDuration}`;
+  if (plan.planKind === "resourceTask") return "下一步更适合先处理奖励和能量。";
+  if (plan.planKind === "exploreTask") return "下一步更适合把探索和陪伴接上。";
+
+  return "我会沿着这个目标继续接住后面的短指令。";
+}
+
 function AiModule({
   eyebrow = "AI 陪伴建议",
   title,
@@ -555,6 +571,8 @@ export default function App() {
     skipPendingAgentAction,
     clearMessages,
     clearActiveGoal,
+    completeActiveGoal,
+    recordPlanStepProgress,
     askPetForAdvice,
     selectPet,
     feedPet,
@@ -580,6 +598,21 @@ export default function App() {
     if (/^(你好|您好|嗨|哈喽|hi|hello|谢谢|好的|收到)[!！。.？? ]*$/iu.test(label)) return "";
     return label;
   }, [state.agent.activeGoal]);
+  const activeGoalPlanMessage = useMemo(
+    () =>
+      [...state.messages].reverse().find((message) =>
+        message.type === "structuredPlan"
+        && message.structuredPlan
+        && state.agent.activePlan
+        && message.structuredPlan.goalSummary === state.agent.activePlan.goalSummary,
+      ),
+    [state.agent.activePlan, state.messages],
+  );
+  const activeGoalStepIndex = activeGoalPlanMessage ? companionExecutionSteps[activeGoalPlanMessage.id] : undefined;
+  const activeGoalProgress = useMemo(
+    () => activeGoalProgressCopy(state.agent.activePlan, activeGoalStepIndex),
+    [activeGoalStepIndex, state.agent.activePlan],
+  );
   const visibleNotes = useMemo(
     () => (showAllNotes ? state.notes : state.notes.slice(0, 2)),
     [showAllNotes, state.notes],
@@ -757,12 +790,13 @@ export default function App() {
     }));
   }
 
-  function advanceCompanionExecution(messageId: string, totalSteps: number): void {
+  function advanceCompanionExecution(messageId: string, plan: StructuredPlan): void {
+    const currentIndex = companionExecutionSteps[messageId] ?? 0;
+    recordPlanStepProgress(plan, currentIndex);
     setCompanionExecutionSteps((current) => {
-      const currentIndex = current[messageId] ?? 0;
       return {
         ...current,
-        [messageId]: Math.min(currentIndex + 1, totalSteps),
+        [messageId]: Math.min(currentIndex + 1, plan.steps.length),
       };
     });
   }
@@ -1159,16 +1193,27 @@ export default function App() {
                       <div className="min-w-0 flex-1">
                         <p className="ai-eyebrow">正在陪你推进</p>
                         <p className="mt-2 text-sm font-semibold leading-6 text-ink">{activeGoalLabel}</p>
-                        <p className="mt-1 text-sm leading-6 text-mist">后面只说“继续”“拆吧”或“安排一下”，我会沿着这个目标接着整理。</p>
+                        <p className="mt-1 text-sm leading-6 text-mist">{activeGoalProgress}</p>
+                        <p className="mt-1 text-xs leading-5 text-mist">后面只说“继续”“拆吧”或“安排一下”，我会沿着这个目标接着整理。</p>
                       </div>
-                      <button
-                        type="button"
-                        className="story-button-secondary w-auto px-3 py-2 text-xs"
-                        disabled={companionLoading}
-                        onClick={clearActiveGoal}
-                      >
-                        清除目标
-                      </button>
+                      <div className="flex shrink-0 flex-col gap-2">
+                        <button
+                          type="button"
+                          className="story-button w-auto px-3 py-2 text-xs"
+                          disabled={companionLoading}
+                          onClick={completeActiveGoal}
+                        >
+                          标记完成
+                        </button>
+                        <button
+                          type="button"
+                          className="story-button-secondary w-auto px-3 py-2 text-xs"
+                          disabled={companionLoading}
+                          onClick={clearActiveGoal}
+                        >
+                          换个目标
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : null}
@@ -1266,7 +1311,7 @@ export default function App() {
                               }}
                               onAdvanceExecution={() => {
                                 if (message.structuredPlan) {
-                                  advanceCompanionExecution(message.id, message.structuredPlan.steps.length);
+                                  advanceCompanionExecution(message.id, message.structuredPlan);
                                 }
                               }}
                               onAddToTasks={() => {

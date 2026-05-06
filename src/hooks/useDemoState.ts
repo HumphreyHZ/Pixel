@@ -2359,6 +2359,48 @@ export function useDemoState() {
           activePlan: null,
           pendingAction: null,
           agentStatus: "idle",
+          agentTrace: pushAgentTrace(current.agent.agentTrace, createAgentTrace("已换到新的目标入口，等你说下一件想推进的事。", "skipped")),
+          lastObservedSnapshot: createAgentSnapshot(current),
+        }),
+      });
+    });
+  }
+
+  function completeActiveGoal(): void {
+    setState((current) => {
+      const goalLabel = current.agent.activeGoal?.trim() || current.agent.activePlan?.goalSummary.trim();
+      if (!goalLabel) return current;
+
+      return finalizeState({
+        ...current,
+        agent: normalizeAgentState(current, {
+          activeGoal: null,
+          activePlan: null,
+          pendingAction: null,
+          agentStatus: "done",
+          agentTrace: pushAgentTrace(current.agent.agentTrace, createAgentTrace(`已把「${goalLabel}」标记完成。`, "done")),
+          lastObservedSnapshot: createAgentSnapshot(current),
+        }),
+      });
+    });
+  }
+
+  function recordPlanStepProgress(plan: StructuredPlan, completedStepIndex: number): void {
+    setState((current) => {
+      const safeCompletedIndex = Math.max(0, Math.min(completedStepIndex, plan.steps.length - 1));
+      const completedStep = plan.steps[safeCompletedIndex] ?? "这一步";
+      const nextStep = plan.steps[safeCompletedIndex + 1];
+      const message = nextStep
+        ? `已完成第 ${safeCompletedIndex + 1} 步：${completedStep}。下一步是：${nextStep}`
+        : `这组三步已经走完，可以标记「${current.agent.activeGoal ?? plan.goalSummary}」完成。`;
+
+      return finalizeState({
+        ...current,
+        agent: normalizeAgentState(current, {
+          activeGoal: current.agent.activeGoal ?? plan.goalSummary,
+          activePlan: plan,
+          agentStatus: nextStep ? "acting" : "done",
+          agentTrace: pushAgentTrace(current.agent.agentTrace, createAgentTrace(message, "done")),
           lastObservedSnapshot: createAgentSnapshot(current),
         }),
       });
@@ -2710,6 +2752,8 @@ export function useDemoState() {
     skipPendingAgentAction,
     clearMessages,
     clearActiveGoal,
+    completeActiveGoal,
+    recordPlanStepProgress,
     askPetForAdvice,
     selectPet,
     feedPet,

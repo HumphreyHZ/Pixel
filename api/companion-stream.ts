@@ -1,9 +1,47 @@
 import type { CompanionAIRequest, CompanionAIResponse } from "../src/types";
-import { callDeepSeek, getDeepSeekConfig, parseRequestBody } from "./companion";
 
 export const runtime = "nodejs";
 
 type StreamEvent = "status" | "delta" | "final" | "metric" | "error";
+
+const DEFAULT_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_MODEL = "deepseek-v4-flash";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function parseStreamRequestBody(value: unknown): CompanionAIRequest | null {
+  if (!isRecord(value)) return null;
+  if (value.action !== "message" && value.action !== "tasks" && value.action !== "plan" && value.action !== "idea") return null;
+  if (!isNonEmptyString(value.draft) || !isRecord(value.context)) return null;
+
+  return {
+    action: value.action,
+    draft: value.draft.trim(),
+    context: value.context as unknown as CompanionAIRequest["context"],
+  };
+}
+
+function getConfigValue(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getDeepSeekConfig(): { apiKey: string; endpoint: string; model: string } {
+  const apiKey = getConfigValue("DEEPSEEK_API_KEY");
+  if (!apiKey) throw new Error("missing_deepseek_api_key");
+
+  const baseUrl = (getConfigValue("DEEPSEEK_BASE_URL") ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
+  const model = getConfigValue("DEEPSEEK_MODEL") ?? DEFAULT_MODEL;
+
+  return { apiKey, endpoint, model };
+}
 
 function sendEvent(controller: ReadableStreamDefaultController<Uint8Array>, event: StreamEvent, data: unknown): void {
   const encoder = new TextEncoder();
@@ -128,10 +166,26 @@ async function streamDeepSeekReply(
   return streamedText;
 }
 
+async function requestStructuredFinal(request: Request, payload: CompanionAIRequest): Promise<CompanionAIResponse> {
+  const response = await fetch(new URL("/api/companion", request.url), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`companion_final_${response.status}`);
+  }
+
+  return await response.json() as CompanionAIResponse;
+}
+
 export async function POST(request: Request): Promise<Response> {
   const startedAt = Date.now();
   const body: unknown = await request.json();
-  const payload = parseRequestBody(body);
+  const payload = parseStreamRequestBody(body);
 
   if (!payload) {
     return Response.json({ error: "invalid_companion_request" }, { status: 400 });
@@ -162,7 +216,7 @@ export async function POST(request: Request): Promise<Response> {
         }
 
         const finalResult = needsStructuredFinal
-          ? await callDeepSeek(payload)
+          ? await requestStructuredFinal(request, payload)
           : createFinalFromStreamedText(streamedText);
 
         sendEvent(controller, "final", finalResult);

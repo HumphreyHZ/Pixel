@@ -42,6 +42,12 @@ const AGENT_TRACE_LIMIT = 6;
 
 type CompanionActionResult = Omit<CompanionAIResponse, "source"> & { source: "model" | "fallback" };
 
+type CompanionStreamCallbacks = {
+  onStatus?: (label: string) => void;
+  onDelta?: (delta: string) => void;
+  onMetric?: (metric: { name: string; elapsedMs?: number }) => void;
+};
+
 type LocalCompanionIntent = "story" | "start" | "reward" | "rest" | "explore" | "greeting" | "capability" | "gratitude" | "general";
 
 type AgentToolDispatchResult = {
@@ -993,6 +999,114 @@ async function requestCompanionModel(action: CompanionAIAction, draft: string, c
   }
 }
 
+function parseSsePayload(rawEvent: string): { event: string; data: unknown } | null {
+  const eventLine = rawEvent.split(/\r?\n/).find((line) => line.startsWith("event:"));
+  const dataLines = rawEvent
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.replace(/^data:\s?/u, ""));
+
+  if (!dataLines.length) return null;
+
+  try {
+    return {
+      event: eventLine?.replace(/^event:\s?/u, "").trim() || "message",
+      data: JSON.parse(dataLines.join("\n")),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function requestCompanionModelStream(
+  action: CompanionAIAction,
+  draft: string,
+  currentState: DemoState,
+  callbacks: CompanionStreamCallbacks = {},
+): Promise<CompanionAIResponse> {
+  const payload: CompanionAIRequest = {
+    action,
+    draft,
+    context: buildCompanionContext(currentState),
+  };
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch("/api/companion-stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`companion_stream_${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalResult: CompanionAIResponse | null = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() ?? "";
+
+      for (const rawEvent of events) {
+        const parsedEvent = parseSsePayload(rawEvent);
+        if (!parsedEvent) continue;
+
+        if (parsedEvent.event === "status" && isRecord(parsedEvent.data) && isNonEmptyString(parsedEvent.data.label)) {
+          callbacks.onStatus?.(parsedEvent.data.label.trim());
+          continue;
+        }
+
+        if (parsedEvent.event === "delta" && isRecord(parsedEvent.data) && typeof parsedEvent.data.text === "string") {
+          callbacks.onDelta?.(parsedEvent.data.text);
+          continue;
+        }
+
+        if (parsedEvent.event === "metric" && isRecord(parsedEvent.data) && isNonEmptyString(parsedEvent.data.name)) {
+          callbacks.onMetric?.({
+            name: parsedEvent.data.name.trim(),
+            elapsedMs: typeof parsedEvent.data.elapsedMs === "number" ? parsedEvent.data.elapsedMs : undefined,
+          });
+          continue;
+        }
+
+        if (parsedEvent.event === "error") {
+          const detail = isRecord(parsedEvent.data) && isNonEmptyString(parsedEvent.data.error)
+            ? parsedEvent.data.error.trim()
+            : "companion_stream_error";
+          throw new Error(detail);
+        }
+
+        if (parsedEvent.event === "final") {
+          finalResult = parseCompanionResponse(parsedEvent.data, action, draft);
+          if (!finalResult) {
+            throw new Error("invalid_companion_stream_payload");
+          }
+        }
+      }
+    }
+
+    if (!finalResult) {
+      throw new Error("missing_companion_stream_final");
+    }
+
+    return finalResult;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function createFallbackCompanionResult(action: CompanionAIAction, draft: string, currentState: DemoState): CompanionActionResult {
   const intent = detectLocalCompanionIntent(draft);
   const journeyPlan = createStructuredPlanMessage(draft, currentState);
@@ -1631,10 +1745,11 @@ export function useDemoState() {
       clearDraft: boolean;
       userMessageContent?: string;
       fallbackNoticeContent?: string;
+      replaceMessageId?: string;
     },
   ): DemoState {
     const createdAt = Date.now();
-    const nextMessages = [...current.messages];
+    let nextMessages = [...current.messages];
     const shouldReplaceActiveGoal = Boolean(result.structuredPlan) || isGoalBearingCompanionDraft(draft);
     const nextActiveGoal = shouldReplaceActiveGoal
       ? createActiveGoalFromCompanionResult(draft, result.structuredPlan)
@@ -1672,7 +1787,7 @@ export function useDemoState() {
     let nextFocus = current.focus;
     let nextRoute = "companion" as RouteKey;
     const cardsToUpsert: AICard[] = [];
-    const structuredMessageId = createId("msg");
+    const structuredMessageId = options.replaceMessageId ?? createId("msg");
     const resultFocusBrief = result.structuredPlan?.planKind === "lifeTask" || result.structuredPlan?.planKind === "chatOnly"
       ? undefined
       : result.focusBrief;
@@ -1696,6 +1811,24 @@ export function useDemoState() {
       cardsToUpsert.push(createFocusRecapCardFromRecap(result.focusRecap));
     }
 
+    const upsertResultMessage = (message: CompanionMessage) => {
+      if (!options.replaceMessageId) {
+        nextMessages.push(message);
+        return;
+      }
+
+      let replaced = false;
+      nextMessages = nextMessages.map((item) => {
+        if (item.id !== options.replaceMessageId) return item;
+        replaced = true;
+        return message;
+      });
+
+      if (!replaced) {
+        nextMessages.push(message);
+      }
+    };
+
     if (result.structuredPlan) {
       if (action === "plan") {
         nextFocus = { ...current.focus, source: "ai" };
@@ -1708,7 +1841,7 @@ export function useDemoState() {
           selectedPresetId: presetIdForDuration(current, nextFocusBrief.durationMinutes),
         };
       }
-      nextMessages.push(createPetMessage(current, {
+      upsertResultMessage(createPetMessage(current, {
         id: structuredMessageId,
         type: "structuredPlan",
         content: result.content,
@@ -1717,8 +1850,8 @@ export function useDemoState() {
         structuredPlan: result.structuredPlan,
       }));
     } else {
-      nextMessages.push(createPetMessage(current, {
-        id: createId("msg"),
+      upsertResultMessage(createPetMessage(current, {
+        id: structuredMessageId,
         type: "text",
         content: result.content,
         createdAt,
@@ -1797,6 +1930,19 @@ export function useDemoState() {
 
     const snapshot = state;
     const resolvedRequest = resolveCompanionRequest(action, draft, snapshot);
+    const streamMessageId = createId("msg");
+    let hasStreamDelta = false;
+    const patchStreamMessage = (nextContent: string, append = false) => {
+      setState((current) => ({
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === streamMessageId
+            ? { ...message, content: append ? `${message.content}${nextContent}` : nextContent }
+            : message,
+        ),
+      }));
+    };
+
     setCompanionLoading(true);
     setAiErrorMode(false);
     setCompanionThinking({
@@ -1806,18 +1952,26 @@ export function useDemoState() {
       startedAt: Date.now(),
     });
     setState((current) => {
-      const nextMessages = options.addUserMessage
-        ? [
-          ...current.messages,
-          {
+      const createdAt = Date.now();
+      const nextMessages = [
+        ...current.messages,
+        ...(options.addUserMessage
+          ? [{
             id: createId("msg"),
             role: "user" as const,
             type: "text" as const,
             content: resolvedRequest.userMessageContent,
-            createdAt: Date.now(),
-          },
-        ]
-        : current.messages;
+            createdAt,
+          }]
+          : []),
+        createPetMessage(current, {
+          id: streamMessageId,
+          type: "text",
+          content: "正在理解目标...",
+          createdAt,
+          aiSource: "model",
+        }),
+      ];
 
       return {
         ...current,
@@ -1832,13 +1986,34 @@ export function useDemoState() {
     });
 
     try {
-      const modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
+      let modelResult: CompanionAIResponse;
+      try {
+        modelResult = await requestCompanionModelStream(resolvedRequest.action, resolvedRequest.requestDraft, snapshot, {
+          onStatus: (label) => {
+            if (!hasStreamDelta) {
+              patchStreamMessage(`${label}...`);
+            }
+          },
+          onDelta: (delta) => {
+            patchStreamMessage(delta, hasStreamDelta);
+            hasStreamDelta = true;
+          },
+          onMetric: (metric) => {
+            console.info("[companion-stream] metric", metric);
+          },
+        });
+      } catch (streamError) {
+        console.warn("[companion-stream] falling back to json endpoint", streamError);
+        modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
+      }
+
       setAiFallbackReason(null);
       setState((current) =>
         applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, modelResult, {
           addUserMessage: false,
           clearDraft: false,
           userMessageContent: resolvedRequest.userMessageContent,
+          replaceMessageId: streamMessageId,
         }),
       );
     } catch (error) {
@@ -1852,6 +2027,7 @@ export function useDemoState() {
           clearDraft: false,
           userMessageContent: resolvedRequest.userMessageContent,
           fallbackNoticeContent: `${FALLBACK_NOTICE} 原因：${fallbackReason}`,
+          replaceMessageId: streamMessageId,
         }),
       );
     } finally {

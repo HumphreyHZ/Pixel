@@ -17,8 +17,8 @@ import type {
 
 export const runtime = "nodejs";
 
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-v4-flash";
+export const DEFAULT_BASE_URL = "https://api.deepseek.com";
+export const DEFAULT_MODEL = "deepseek-v4-flash";
 const ALLOWED_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explore", "bank", "achievements", "battle", "shop"];
 const ALLOWED_MESSAGE_TYPES: MessageType[] = ["text", "taskCard", "focusPlan", "reward", "recap", "imageCard", "systemEvent", "structuredPlan"];
 const ALLOWED_TOOL_NAMES: AgentToolName[] = ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"];
@@ -406,7 +406,7 @@ function buildFallbackStructuredPlan(draft: string, steps: string[]): Structured
   };
 }
 
-function parseRequestBody(value: unknown): CompanionAIRequest | null {
+export function parseRequestBody(value: unknown): CompanionAIRequest | null {
   if (!isRecord(value)) return null;
 
   const action = value.action;
@@ -608,6 +608,19 @@ async function getConfigValue(name: string): Promise<string | undefined> {
   return fallbackValue && fallbackValue.trim().length > 0 ? fallbackValue.trim() : undefined;
 }
 
+export async function getDeepSeekConfig(): Promise<{ apiKey: string; endpoint: string; model: string }> {
+  const apiKey = await getConfigValue("DEEPSEEK_API_KEY");
+  if (!apiKey) {
+    throw new Error("missing_deepseek_api_key");
+  }
+
+  const baseUrl = ((await getConfigValue("DEEPSEEK_BASE_URL")) ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
+  const model = (await getConfigValue("DEEPSEEK_MODEL")) ?? DEFAULT_MODEL;
+
+  return { apiKey, endpoint, model };
+}
+
 function isCompanionFlowDraft(draft: string): boolean {
   return /(专注|奖励|能量|步数|晶石|探索|宠物|图鉴|喂食|互动|地图|陪伴|主线|闭环|领奖|对战|商店)/u.test(draft);
 }
@@ -687,37 +700,19 @@ function polishStructuredPlan(
 function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContext, draft: string): string {
   const intent = detectDraftIntent(draft);
   const basePrompt = [
-    "你是一个像素宠物专注 app 的陪伴整理助手。",
-    `当前陪伴名字是：${context.activePet.name}。只有在用户明确在说 app 里的当前陪伴、探索、喂食、图鉴或宠物互动时，才自然地使用这个名字。`,
-    "语气要治愈、聪明、有陪伴感，用短句和鼓励式表达。",
-    "先直接回应用户眼前这句话，再决定要不要顺手给下一步建议。",
-    "只有在用户明确请求整理主线、拆步骤、决定下一步时，才把回答组织成清晰计划。",
-    "不要把所有输入都自动拉回“先专注 -> 再领奖 -> 再探索”的同一套模板。",
-    "说话要像宠物在轻轻接住用户，而不是任务助手在下指令。",
-    "不要反复使用同一种开场，比如“好呀，我们先…”。不同输入要有明显不同的回应方式。",
-    "不要总以“今天想从哪里开始”或类似问题结尾。只有用户明确在问下一步时，才这样追问。",
-    "如果用户当前输入很短，比如“拆吧”“安排一下”“开始吧”“就按这个来”，优先把它理解成对 context.agent.activeGoal 或最近一条计划的跟进，而不是全新话题。",
-    "如果 context.agent.activeGoal 不为空，而用户当前输入只是简短确认或续接，请沿着这个目标继续往下推进。",
-    "如果用户只是打招呼、表达情绪、提到自己有点乱、累、走神，先回应状态本身，不要立刻拉去专注。",
-    "如果提到资源，优先说“把奖励接回来”或“去奖励页把能量领回来”。",
-    "如果提到宠物，不要写“陪伴小羊”“陪伴宠物”这种生硬说法，要写成自然句子。",
-    "如果用户说的是现实生活里的猫狗、遛狗、散步、洗猫、洗澡等日常事务，不要把它写成当前陪伴名字，也不要把现实里的动物替换成 app 陪伴角色。",
-    "避免使用“看到你回来了”“开始专注任务”“开启番茄钟”这种像模板或工具说明的说法。",
-    "不要用“看到你…所以…”、“用户”、“任务助手”、“APP 功能”、“系统建议”这种机械或旁白式表达。",
-    "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘、产品设计等打破产品语境的词。",
-    "你不只是聊天，也可以通过 toolCalls 建议工具动作，帮用户把下一步准备好或推进一步。",
-    "toolCalls 最多 2 个。只有真的能帮助用户推进当前目标时，才返回 toolCalls，不要为了显得像 Agent 而硬凑动作。",
-    "可用工具只有：createTasks、setRoute、startFocus、createIdea、selectPet、claimRecommended、noop。",
-    "低风险动作可以 requiresConfirmation=false；startFocus、claimRecommended，以及会明显打断当前流程的 setRoute 要 requiresConfirmation=true。",
-    "当用户的目标适合先进入专注页时，可以返回 focusBrief。focusBrief 要说明本轮目标、建议时长、完成标准和完成后下一步。",
-    "当用户在请求专注后复盘，或上下文说明刚完成一轮专注时，可以返回 focusRecap。focusRecap 要说明刚推进了什么、这轮的意义和下一步。",
-    "structuredPlan 必须带 planKind，用来区分 lifeTask、focusTask、resourceTask、exploreTask、chatOnly。",
-    "现实生活里的三步小事用 lifeTask；需要进入计时专注的脑力任务用 focusTask；奖励、能量、晶石用 resourceTask；宠物、地图、探索用 exploreTask。",
+    "你是像素宠物专注 app 的陪伴整理助手，语气治愈、聪明、有陪伴感。",
+    `当前陪伴：${context.activePet.name}。只有用户说 app 内陪伴、探索、喂食、图鉴或互动时才使用这个名字；现实猫狗不要替换成陪伴名。`,
+    "先接住用户这句话，再给最短下一步。不要每次套用“专注->领奖->探索”。",
+    "短输入如“继续”“拆吧”“安排一下”要沿着 context.agent.activeGoal 或最近计划继续。",
+    "禁止出现：面试官、评审、作品集、展示、demo、录屏、测试、招聘、APP 功能、用户、任务助手。",
+    "不要用机械模板：看到你…所以…、看到你回来了、开启番茄钟、开始专注任务。",
+    "可用工具：createTasks、setRoute、startFocus、createIdea、selectPet、claimRecommended、noop；最多 2 个 toolCalls。",
+    "只在真的能推进时返回 toolCalls；startFocus、claimRecommended 或打断流程的 setRoute 必须 requiresConfirmation=true。",
+    "structuredPlan 必须有 planKind：lifeTask、focusTask、resourceTask、exploreTask、chatOnly。",
+    "生活三步用 lifeTask；脑力/计时用 focusTask；奖励资源用 resourceTask；宠物地图用 exploreTask。",
     `nextRoute 只能从这些值里选择：${ALLOWED_ROUTES.join(", ")}。`,
-    "如果返回 structuredPlan，steps 必须正好 3 条，每条都是清晰、可执行的中文短句。",
-    "content 写 1 到 3 句中文，像宠物在温柔地接住用户并推动下一步。",
-    "recommendedDuration 要写成“25 分钟深度专注”或“10 分钟快速热身”这种格式。",
-    "只输出 JSON，不要 markdown，不要解释，不要代码块。",
+    "content 写 1-2 句中文；steps 正好 3 条；recommendedDuration 写成“25 分钟深度专注”或“10 分钟快速热身”。",
+    "只输出 JSON，不要 markdown、解释或代码块。",
   ];
 
   const intentPromptMap: Record<DraftIntent, string> = {
@@ -735,16 +730,16 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
   };
 
   const messageShape = isTaskOrientedIntent(intent)
-    ? `返回 JSON 结构：{"content":"..."}，或 {"content":"...","structuredPlan":{"planKind":"lifeTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."},"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}。只有当用户明确在请求你整理主线、拆步骤、决定下一步时，才附带 structuredPlan；只有当真的能推进一步时，才附带 toolCalls；只有当下一步适合专注页时，才附带 focusBrief。`
-    : `返回 JSON 结构：{"content":"..."}，或 {"content":"...","toolCalls":[{"name":"setRoute","args":{"route":"companion"},"requiresConfirmation":false,"reason":"..."}]}。普通聊天以自然文本为主，不要为了表现像 Agent 而硬凑动作。`;
+    ? `json: {"content":"...","structuredPlan":{"planKind":"lifeTask|focusTask|resourceTask|exploreTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."},"toolCalls":[...]}。不需要的字段省略。`
+    : `json: {"content":"..."}。普通聊天不要硬凑 structuredPlan 或 toolCalls。`;
 
   const actionPromptMap: Record<CompanionAIAction, string> = {
     message: intent === "recap"
-      ? `返回 JSON 结构：{"content":"...","focusRecap":{"summary":"...","completedMeaning":"...","nextStep":"...","nextRoute":"bank","ctaLabel":"去领取能量"}}。nextRoute 只能使用允许值。`
+      ? `json: {"content":"...","focusRecap":{"summary":"...","completedMeaning":"...","nextStep":"...","nextRoute":"bank","ctaLabel":"去领取能量"}}。`
       : messageShape,
-    plan: `返回 JSON 结构：{"content":"...","structuredPlan":{"planKind":"focusTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."},"toolCalls":[{"name":"setRoute","args":{"route":"focus"},"requiresConfirmation":false,"reason":"..."}]}`,
-    tasks: `返回 JSON 结构：{"content":"...","structuredPlan":{"planKind":"lifeTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"...","nextAction":"...","why":"..."},"tasks":["...","...","..."],"toolCalls":[{"name":"createTasks","args":{"titles":["...","...","..."]},"requiresConfirmation":false,"reason":"..."}]}`,
-    idea: `返回 JSON 结构：{"content":"...","note":{"title":"...","body":"..."},"quoteRef":"...","toolCalls":[{"name":"createIdea","args":{"title":"...","body":"...","quoteRef":"..."},"requiresConfirmation":false,"reason":"..."}]}`,
+    plan: `json: {"content":"...","structuredPlan":{"planKind":"focusTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"...","nextRoute":"focus","nextAction":"...","why":"..."},"focusBrief":{"goal":"...","durationLabel":"...","durationMinutes":25,"successCriteria":"...","afterFocusNextStep":"..."}}`,
+    tasks: `json: {"content":"...","structuredPlan":{"planKind":"lifeTask","goalSummary":"...","steps":["...","...","..."],"recommendedDuration":"照着三步慢慢来","nextRoute":"companion","nextAction":"...","why":"..."},"tasks":["...","...","..."]}`,
+    idea: `json: {"content":"...","note":{"title":"...","body":"..."},"quoteRef":"..."}`,
   };
 
   return [...basePrompt, intentPromptMap[intent], actionPromptMap[action]].join("\n");
@@ -831,14 +826,7 @@ async function requestDeepSeekContent(
   payload: CompanionAIRequest,
   options?: { retryMode?: boolean },
 ): Promise<string> {
-  const apiKey = await getConfigValue("DEEPSEEK_API_KEY");
-  if (!apiKey) {
-    throw new Error("missing_deepseek_api_key");
-  }
-
-  const baseUrl = ((await getConfigValue("DEEPSEEK_BASE_URL")) ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-  const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
-  const model = (await getConfigValue("DEEPSEEK_MODEL")) ?? DEFAULT_MODEL;
+  const { apiKey, endpoint, model } = await getDeepSeekConfig();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   const retryNote = options?.retryMode
@@ -898,7 +886,7 @@ async function requestDeepSeekContent(
   }
 }
 
-async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIResponse> {
+export async function callDeepSeek(payload: CompanionAIRequest): Promise<CompanionAIResponse> {
   let lastError: unknown;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {

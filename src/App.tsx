@@ -613,6 +613,15 @@ export default function App() {
     () => activeGoalProgressCopy(state.agent.activePlan, activeGoalStepIndex),
     [activeGoalStepIndex, state.agent.activePlan],
   );
+  const hasActiveStreamingMessage = useMemo(
+    () =>
+      companionLoading
+      && recentMessages.some((message) =>
+        message.role === "pet"
+        && message.aiSource === "model"
+        && Date.now() - message.createdAt < 30_000),
+    [companionLoading, recentMessages],
+  );
   const visibleNotes = useMemo(
     () => (showAllNotes ? state.notes : state.notes.slice(0, 2)),
     [showAllNotes, state.notes],
@@ -1328,7 +1337,7 @@ export default function App() {
                       </article>
                     ))
                   ) : null}
-                  {companionLoading && companionThinking ? (
+                  {companionLoading && companionThinking && !hasActiveStreamingMessage ? (
                     <article className="flex flex-col gap-2 items-start">
                       <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
                         <span>{activePet.name} · 刚刚</span>

@@ -1,8 +1,8 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CompanionAIRequest, CompanionAIResponse } from "../src/types";
 
-export const runtime = "nodejs";
-
 type StreamEvent = "status" | "delta" | "final" | "metric" | "error";
+type VercelIncomingMessage = IncomingMessage & { body?: unknown };
 
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -43,10 +43,9 @@ function getDeepSeekConfig(): { apiKey: string; endpoint: string; model: string 
   return { apiKey, endpoint, model };
 }
 
-function sendEvent(controller: ReadableStreamDefaultController<Uint8Array>, event: StreamEvent, data: unknown): void {
-  const encoder = new TextEncoder();
-  controller.enqueue(encoder.encode(`event: ${event}\n`));
-  controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+function sendEvent(response: ServerResponse, event: StreamEvent, data: unknown): void {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 function shouldRequestStructuredFinal(payload: CompanionAIRequest): boolean {
@@ -57,9 +56,10 @@ function shouldRequestStructuredFinal(payload: CompanionAIRequest): boolean {
 }
 
 function buildStreamingPrompt(payload: CompanionAIRequest): string {
-  const activeGoal = payload.context.agent.activeGoal
+  const activeGoal = payload.context.agent?.activeGoal
     ? `当前目标：${payload.context.agent.activeGoal}。`
     : "当前没有固定目标。";
+  const activePetName = payload.context.activePet?.name ?? "当前陪伴";
 
   return [
     "你是像素宠物专注 app 里的陪伴整理助手。",
@@ -69,7 +69,7 @@ function buildStreamingPrompt(payload: CompanionAIRequest): string {
     "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘。",
     "现实里的猫狗不要替换成 app 当前陪伴名。",
     activeGoal,
-    `当前陪伴：${payload.context.activePet.name}。`,
+    `当前陪伴：${activePetName}。`,
     `动作类型：${payload.action}。`,
   ].join("\n");
 }
@@ -166,8 +166,20 @@ async function streamDeepSeekReply(
   return streamedText;
 }
 
-async function requestStructuredFinal(request: Request, payload: CompanionAIRequest): Promise<CompanionAIResponse> {
-  const response = await fetch(new URL("/api/companion", request.url), {
+function getRequestOrigin(request: IncomingMessage): string {
+  const host = request.headers.host;
+  if (!host) return "";
+
+  const forwardedProto = request.headers["x-forwarded-proto"];
+  const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  return `${protocol ?? "https"}://${host}`;
+}
+
+async function requestStructuredFinal(request: IncomingMessage, payload: CompanionAIRequest): Promise<CompanionAIResponse> {
+  const origin = getRequestOrigin(request);
+  if (!origin) throw new Error("missing_request_origin");
+
+  const response = await fetch(`${origin}/api/companion`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -182,69 +194,98 @@ async function requestStructuredFinal(request: Request, payload: CompanionAIRequ
   return await response.json() as CompanionAIResponse;
 }
 
-export async function POST(request: Request): Promise<Response> {
-  const startedAt = Date.now();
-  const body: unknown = await request.json();
-  const payload = parseStreamRequestBody(body);
-
-  if (!payload) {
-    return Response.json({ error: "invalid_companion_request" }, { status: 400 });
+async function readRequestBody(request: VercelIncomingMessage): Promise<unknown> {
+  if (request.body !== undefined) {
+    return typeof request.body === "string" ? JSON.parse(request.body) : request.body;
   }
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        sendEvent(controller, "status", { label: "正在理解目标" });
-        sendEvent(controller, "metric", { name: "function_start", elapsedMs: 0 });
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
 
-        let streamedText = "";
-        streamedText = await streamDeepSeekReply(
-          payload,
-          (delta) => sendEvent(controller, "delta", { text: delta }),
-          (name, at) => {
-            const elapsedMs = at - startedAt;
-            sendEvent(controller, "metric", { name, elapsedMs });
-            console.info("[companion-stream] metric", { action: payload.action, name, elapsedMs });
-          },
-        );
+  const rawBody = Buffer.concat(chunks).toString("utf8");
+  return rawBody ? JSON.parse(rawBody) : null;
+}
 
-        sendEvent(controller, "metric", { name: "deepseek_stream_done", elapsedMs: Date.now() - startedAt });
+export default async function handler(request: VercelIncomingMessage, response: ServerResponse): Promise<void> {
+  const startedAt = Date.now();
+  let payload: CompanionAIRequest | null = null;
 
-        const needsStructuredFinal = shouldRequestStructuredFinal(payload);
-        if (needsStructuredFinal) {
-          sendEvent(controller, "status", { label: "正在准备任务卡" });
-        }
+  if (request.method !== "POST") {
+    response.statusCode = 405;
+    response.setHeader("Allow", "POST");
+    response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.end(JSON.stringify({ error: "method_not_allowed" }));
+    return;
+  }
 
-        const finalResult = needsStructuredFinal
-          ? await requestStructuredFinal(request, payload)
-          : createFinalFromStreamedText(streamedText);
+  try {
+    const body = await readRequestBody(request);
+    payload = parseStreamRequestBody(body);
 
-        sendEvent(controller, "final", finalResult);
-        sendEvent(controller, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
-        console.info("[companion-stream] completed", {
-          action: payload.action,
-          structured: needsStructuredFinal,
-          elapsedMs: Date.now() - startedAt,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "companion_stream_error";
-        console.error("[companion-stream] failed", {
-          action: payload.action,
-          draft: payload.draft.slice(0, 120),
-          error: message,
-        });
-        sendEvent(controller, "error", { error: message });
-      } finally {
-        controller.close();
-      }
-    },
-  });
+    if (!payload) {
+      response.statusCode = 400;
+      response.setHeader("Content-Type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ error: "invalid_companion_request" }));
+      return;
+    }
+  } catch (error) {
+    response.statusCode = 400;
+    response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.end(JSON.stringify({ error: error instanceof Error ? error.message : "invalid_companion_request" }));
+    return;
+  }
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.setHeader("X-Accel-Buffering", "no");
+  response.flushHeaders?.();
+
+  try {
+    console.info("[companion-stream] invoked", { action: payload.action });
+    sendEvent(response, "status", { label: "正在理解目标" });
+    sendEvent(response, "metric", { name: "function_start", elapsedMs: 0 });
+
+    const streamedText = await streamDeepSeekReply(
+      payload,
+      (delta) => sendEvent(response, "delta", { text: delta }),
+      (name, at) => {
+        const elapsedMs = at - startedAt;
+        sendEvent(response, "metric", { name, elapsedMs });
+        console.info("[companion-stream] metric", { action: payload?.action, name, elapsedMs });
+      },
+    );
+
+    sendEvent(response, "metric", { name: "deepseek_stream_done", elapsedMs: Date.now() - startedAt });
+
+    const needsStructuredFinal = shouldRequestStructuredFinal(payload);
+    if (needsStructuredFinal) {
+      sendEvent(response, "status", { label: "正在准备任务卡" });
+    }
+
+    const finalResult = needsStructuredFinal
+      ? await requestStructuredFinal(request, payload)
+      : createFinalFromStreamedText(streamedText);
+
+    sendEvent(response, "final", finalResult);
+    sendEvent(response, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
+    console.info("[companion-stream] completed", {
+      action: payload.action,
+      structured: needsStructuredFinal,
+      elapsedMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "companion_stream_error";
+    console.error("[companion-stream] failed", {
+      action: payload?.action ?? null,
+      draft: payload?.draft.slice(0, 120) ?? null,
+      error: message,
+    });
+    sendEvent(response, "error", { error: message });
+  } finally {
+    response.end();
+  }
 }

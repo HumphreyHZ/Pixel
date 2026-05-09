@@ -14,6 +14,7 @@ import type {
   CompanionAIContext,
   CompanionAIRequest,
   CompanionAIResponse,
+  CompanionStreamMode,
   CompanionMessage,
   DemoState,
   FocusBrief,
@@ -64,6 +65,14 @@ function getPresetMeta(currentState: DemoState, presetId: string) {
 
 function createId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 function createAgentTrace(message: string, status: AgentTraceStatus, createdAt = Date.now()): AgentTrace {
@@ -477,6 +486,37 @@ function createStructuredPlanMessage(draft: string, currentState: DemoState) {
   };
 }
 
+function createStreamingSkeletonPlan(action: CompanionAIAction, draft: string): StructuredPlan {
+  if (action === "idea") {
+    return {
+      planKind: "chatOnly",
+      goalSummary: "把这句话暂时收成一条灵感",
+      steps: ["提炼值得留下的想法", "整理成一条灵感纸条", "放进灵感区方便后面展开"],
+      recommendedDuration: "灵感整理中",
+      nextRoute: "companion",
+      nextAction: "准备收进灵感",
+      why: "先保存想法，再决定要不要拆成待办。",
+    };
+  }
+
+  const planKind = action === "tasks" ? "lifeTask" : inferPlanKindFromDraft(draft, action === "plan" ? "focus" : "companion");
+  const goalSummary = action === "tasks"
+    ? "把这件事拆成三个顺手步骤"
+    : action === "plan"
+      ? "把当前目标整理成可以开始的一轮"
+      : "把这句话整理成可执行结果";
+
+  return {
+    planKind,
+    goalSummary,
+    steps: ["确认目标", "拆出关键动作", "准备下一步"],
+    recommendedDuration: "正在整理",
+    nextRoute: planKind === "focusTask" ? "focus" : "companion",
+    nextAction: "准备填入结果",
+    why: "我会先搭好结果骨架，再把真实整理内容填进来。",
+  };
+}
+
 function getFocusElapsedSeconds(focus: DemoState["focus"], currentTime = Date.now()): number {
   if (!focus.running || !focus.startedAt) return 0;
   return Math.max(0, Math.floor((currentTime - focus.startedAt) / 1000));
@@ -563,6 +603,26 @@ function detectExplicitCompanionAction(draft: string): CompanionAIAction | null 
   }
 
   return null;
+}
+
+function isModeChoiceDraft(draft: string): boolean {
+  const normalized = draft.trim();
+  return /(判断|适合|该不该|要不要|先).*(专注|热身|休息|整理)/u.test(normalized)
+    && /(专注|热身|休息)/u.test(normalized);
+}
+
+function getCompanionStreamMode(action: CompanionAIAction, draft: string): CompanionStreamMode {
+  const normalized = draft.trim();
+  if (action !== "message") return "card";
+  if (isModeChoiceDraft(normalized)) return "text";
+
+  const intent = detectLocalCompanionIntent(normalized);
+  if (["greeting", "capability", "gratitude", "rest"].includes(intent)) return "text";
+
+  return /(拆成|分成|列出|三步|3\s*步|步骤|待办|安排|排一下|主线|闭环|从哪开始|下一步|先做什么|规划|路线|存成灵感|收进灵感|复盘|开始第一步)/u
+    .test(normalized)
+    ? "card"
+    : "text";
 }
 
 function getLatestMeaningfulCompanionGoal(currentState: DemoState): string | null {
@@ -814,7 +874,11 @@ function parseFocusRecap(value: unknown): FocusRecap | undefined {
 }
 
 function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft: string): CompanionAIResponse | null {
-  if (!isRecord(data) || data.source !== "model" || !isNonEmptyString(data.content)) {
+  if (
+    !isRecord(data)
+    || (data.source !== "model" && data.source !== "fallback")
+    || !isNonEmptyString(data.content)
+  ) {
     return null;
   }
 
@@ -824,7 +888,7 @@ function parseCompanionResponse(data: unknown, action: CompanionAIAction, draft:
   const focusRecap = parseFocusRecap(data.focusRecap);
   const baseResponse: CompanionAIResponse = {
     content: data.content.trim(),
-    source: "model",
+    source: data.source,
     toolCalls,
     ...(focusBrief ? { focusBrief } : {}),
     ...(focusRecap ? { focusRecap } : {}),
@@ -1022,12 +1086,14 @@ async function requestCompanionModelStream(
   action: CompanionAIAction,
   draft: string,
   currentState: DemoState,
+  streamMode: CompanionStreamMode,
   callbacks: CompanionStreamCallbacks = {},
 ): Promise<CompanionAIResponse> {
   const payload: CompanionAIRequest = {
     action,
     draft,
     context: buildCompanionContext(currentState),
+    streamMode,
   };
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 20000);
@@ -1930,6 +1996,7 @@ export function useDemoState() {
 
     const snapshot = state;
     const resolvedRequest = resolveCompanionRequest(action, draft, snapshot);
+    const streamMode = getCompanionStreamMode(resolvedRequest.action, resolvedRequest.requestDraft);
     const streamMessageId = createId("msg");
     let hasStreamDelta = false;
     const patchStreamMessage = (nextContent: string, append = false) => {
@@ -1953,6 +2020,24 @@ export function useDemoState() {
     });
     setState((current) => {
       const createdAt = Date.now();
+      const streamingMessage = streamMode === "card"
+        ? createPetMessage(current, {
+          id: streamMessageId,
+          type: "structuredPlan",
+          content: "正在把这句话整理成可执行结果...",
+          createdAt,
+          aiSource: "model",
+          streaming: true,
+          structuredPlan: createStreamingSkeletonPlan(resolvedRequest.action, resolvedRequest.requestDraft),
+        })
+        : createPetMessage(current, {
+          id: streamMessageId,
+          type: "text",
+          content: "正在理解这句话...",
+          createdAt,
+          aiSource: "model",
+          streaming: true,
+        });
       const nextMessages = [
         ...current.messages,
         ...(options.addUserMessage
@@ -1964,13 +2049,7 @@ export function useDemoState() {
             createdAt,
           }]
           : []),
-        createPetMessage(current, {
-          id: streamMessageId,
-          type: "text",
-          content: "正在理解目标...",
-          createdAt,
-          aiSource: "model",
-        }),
+        streamingMessage,
       ];
 
       return {
@@ -1986,9 +2065,11 @@ export function useDemoState() {
     });
 
     try {
+      await waitForNextPaint();
+
       let modelResult: CompanionAIResponse;
       try {
-        modelResult = await requestCompanionModelStream(resolvedRequest.action, resolvedRequest.requestDraft, snapshot, {
+        modelResult = await requestCompanionModelStream(resolvedRequest.action, resolvedRequest.requestDraft, snapshot, streamMode, {
           onStatus: (label) => {
             if (!hasStreamDelta) {
               patchStreamMessage(`${label}...`);

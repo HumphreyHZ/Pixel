@@ -1,58 +1,38 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
-import type { CompanionAIRequest, CompanionAIResponse } from "../src/types";
+import { callDeepSeek, getDeepSeekConfig, parseRequestBody } from "./companion";
+import type { CompanionAIRequest, CompanionAIResponse, CompanionStreamMode } from "../src/types";
+
+export const runtime = "nodejs";
 
 type StreamEvent = "status" | "delta" | "final" | "metric" | "error";
-type VercelIncomingMessage = IncomingMessage & { body?: unknown };
 
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-v4-flash";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function parseStreamRequestBody(value: unknown): CompanionAIRequest | null {
-  if (!isRecord(value)) return null;
-  if (value.action !== "message" && value.action !== "tasks" && value.action !== "plan" && value.action !== "idea") return null;
-  if (!isNonEmptyString(value.draft) || !isRecord(value.context)) return null;
-
-  return {
-    action: value.action,
-    draft: value.draft.trim(),
-    context: value.context as unknown as CompanionAIRequest["context"],
-  };
-}
-
-function getConfigValue(name: string): string | undefined {
-  const value = process.env[name];
-  return value && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function getDeepSeekConfig(): { apiKey: string; endpoint: string; model: string } {
-  const apiKey = getConfigValue("DEEPSEEK_API_KEY");
-  if (!apiKey) throw new Error("missing_deepseek_api_key");
-
-  const baseUrl = (getConfigValue("DEEPSEEK_BASE_URL") ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-  const endpoint = baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl}/chat/completions`;
-  const model = getConfigValue("DEEPSEEK_MODEL") ?? DEFAULT_MODEL;
-
-  return { apiKey, endpoint, model };
-}
-
-function sendEvent(response: ServerResponse, event: StreamEvent, data: unknown): void {
-  response.write(`event: ${event}\n`);
-  response.write(`data: ${JSON.stringify(data)}\n\n`);
+function sendEvent(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  event: StreamEvent,
+  data: unknown,
+): void {
+  controller.enqueue(encoder.encode(`event: ${event}\n`));
+  controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 }
 
 function shouldRequestStructuredFinal(payload: CompanionAIRequest): boolean {
   if (payload.action !== "message") return true;
 
+  if (/(判断|适合|该不该|要不要|先).*(专注|热身|休息|整理)/u.test(payload.draft)
+    && /(专注|热身|休息)/u.test(payload.draft)) {
+    return false;
+  }
+
   return /(主线|闭环|从哪开始|先做什么|下一步|安排|规划|拆|三步|奖励|能量|探索|专注|休息|热身|复盘|总结)/u
     .test(payload.draft);
+}
+
+function resolveStreamMode(payload: CompanionAIRequest): CompanionStreamMode {
+  if (payload.streamMode === "text" || payload.streamMode === "card") {
+    return payload.streamMode;
+  }
+
+  return shouldRequestStructuredFinal(payload) ? "card" : "text";
 }
 
 function buildStreamingPrompt(payload: CompanionAIRequest): string {
@@ -166,126 +146,92 @@ async function streamDeepSeekReply(
   return streamedText;
 }
 
-function getRequestOrigin(request: IncomingMessage): string {
-  const host = request.headers.host;
-  if (!host) return "";
-
-  const forwardedProto = request.headers["x-forwarded-proto"];
-  const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  return `${protocol ?? "https"}://${host}`;
-}
-
-async function requestStructuredFinal(request: IncomingMessage, payload: CompanionAIRequest): Promise<CompanionAIResponse> {
-  const origin = getRequestOrigin(request);
-  if (!origin) throw new Error("missing_request_origin");
-
-  const response = await fetch(`${origin}/api/companion`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    throw new Error(`companion_final_${response.status}`);
-  }
-
-  return await response.json() as CompanionAIResponse;
-}
-
-async function readRequestBody(request: VercelIncomingMessage): Promise<unknown> {
-  if (request.body !== undefined) {
-    return typeof request.body === "string" ? JSON.parse(request.body) : request.body;
-  }
-
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  const rawBody = Buffer.concat(chunks).toString("utf8");
-  return rawBody ? JSON.parse(rawBody) : null;
-}
-
-export default async function handler(request: VercelIncomingMessage, response: ServerResponse): Promise<void> {
+export async function POST(request: Request): Promise<Response> {
   const startedAt = Date.now();
   let payload: CompanionAIRequest | null = null;
 
-  if (request.method !== "POST") {
-    response.statusCode = 405;
-    response.setHeader("Allow", "POST");
-    response.setHeader("Content-Type", "application/json; charset=utf-8");
-    response.end(JSON.stringify({ error: "method_not_allowed" }));
-    return;
-  }
-
   try {
-    const body = await readRequestBody(request);
-    payload = parseStreamRequestBody(body);
-
-    if (!payload) {
-      response.statusCode = 400;
-      response.setHeader("Content-Type", "application/json; charset=utf-8");
-      response.end(JSON.stringify({ error: "invalid_companion_request" }));
-      return;
-    }
+    const body: unknown = await request.json();
+    payload = parseRequestBody(body);
   } catch (error) {
-    response.statusCode = 400;
-    response.setHeader("Content-Type", "application/json; charset=utf-8");
-    response.end(JSON.stringify({ error: error instanceof Error ? error.message : "invalid_companion_request" }));
-    return;
-  }
-
-  response.statusCode = 200;
-  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  response.setHeader("Cache-Control", "no-cache, no-transform");
-  response.setHeader("Connection", "keep-alive");
-  response.setHeader("X-Accel-Buffering", "no");
-  response.flushHeaders?.();
-
-  try {
-    console.info("[companion-stream] invoked", { action: payload.action });
-    sendEvent(response, "status", { label: "正在理解目标" });
-    sendEvent(response, "metric", { name: "function_start", elapsedMs: 0 });
-
-    const streamedText = await streamDeepSeekReply(
-      payload,
-      (delta) => sendEvent(response, "delta", { text: delta }),
-      (name, at) => {
-        const elapsedMs = at - startedAt;
-        sendEvent(response, "metric", { name, elapsedMs });
-        console.info("[companion-stream] metric", { action: payload?.action, name, elapsedMs });
-      },
+    return Response.json(
+      { error: error instanceof Error ? error.message : "invalid_companion_request" },
+      { status: 400 },
     );
-
-    sendEvent(response, "metric", { name: "deepseek_stream_done", elapsedMs: Date.now() - startedAt });
-
-    const needsStructuredFinal = shouldRequestStructuredFinal(payload);
-    if (needsStructuredFinal) {
-      sendEvent(response, "status", { label: "正在准备任务卡" });
-    }
-
-    const finalResult = needsStructuredFinal
-      ? await requestStructuredFinal(request, payload)
-      : createFinalFromStreamedText(streamedText);
-
-    sendEvent(response, "final", finalResult);
-    sendEvent(response, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
-    console.info("[companion-stream] completed", {
-      action: payload.action,
-      structured: needsStructuredFinal,
-      elapsedMs: Date.now() - startedAt,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "companion_stream_error";
-    console.error("[companion-stream] failed", {
-      action: payload?.action ?? null,
-      draft: payload?.draft.slice(0, 120) ?? null,
-      error: message,
-    });
-    sendEvent(response, "error", { error: message });
-  } finally {
-    response.end();
   }
+
+  if (!payload) {
+    return Response.json({ error: "invalid_companion_request" }, { status: 400 });
+  }
+
+  const streamPayload = payload;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const encoder = new TextEncoder();
+
+      try {
+        const streamMode = resolveStreamMode(streamPayload);
+        console.info("[companion-stream] invoked", { action: streamPayload.action, streamMode });
+        sendEvent(controller, encoder, "status", { label: "正在理解目标" });
+        sendEvent(controller, encoder, "metric", { name: "function_start", elapsedMs: 0 });
+        sendEvent(controller, encoder, "metric", { name: "first_event_sent", elapsedMs: Date.now() - startedAt });
+
+        if (streamMode === "card") {
+          sendEvent(controller, encoder, "status", { label: "正在搭好卡片骨架" });
+          sendEvent(controller, encoder, "status", { label: "正在填入整理结果" });
+          sendEvent(controller, encoder, "metric", { name: "deepseek_start", elapsedMs: Date.now() - startedAt });
+
+          const finalResult = await callDeepSeek({ ...streamPayload, streamMode });
+
+          sendEvent(controller, encoder, "final", finalResult);
+          sendEvent(controller, encoder, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
+          console.info("[companion-stream] completed", {
+            action: streamPayload.action,
+            streamMode,
+            elapsedMs: Date.now() - startedAt,
+          });
+          return;
+        }
+
+        sendEvent(controller, encoder, "metric", { name: "deepseek_start", elapsedMs: Date.now() - startedAt });
+        const streamedText = await streamDeepSeekReply(
+          streamPayload,
+          (delta) => sendEvent(controller, encoder, "delta", { text: delta }),
+          (name, at) => {
+            const elapsedMs = at - startedAt;
+            sendEvent(controller, encoder, "metric", { name, elapsedMs });
+            console.info("[companion-stream] metric", { action: streamPayload.action, name, elapsedMs });
+          },
+        );
+
+        sendEvent(controller, encoder, "metric", { name: "deepseek_stream_done", elapsedMs: Date.now() - startedAt });
+        const finalResult = createFinalFromStreamedText(streamedText);
+        sendEvent(controller, encoder, "final", finalResult);
+        sendEvent(controller, encoder, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
+        console.info("[companion-stream] completed", {
+          action: streamPayload.action,
+          streamMode,
+          elapsedMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "companion_stream_error";
+        console.error("[companion-stream] failed", {
+          action: streamPayload.action,
+          draft: streamPayload.draft.slice(0, 120),
+          error: message,
+        });
+        sendEvent(controller, encoder, "error", { error: message });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

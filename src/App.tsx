@@ -311,6 +311,7 @@ function StructuredPlanMessage({
   content,
   plan,
   executionStepIndex,
+  loading = false,
   onAdvanceExecution,
   onPrimary,
   onAddToTasks,
@@ -319,6 +320,7 @@ function StructuredPlanMessage({
   content: string;
   plan: StructuredPlan;
   executionStepIndex?: number;
+  loading?: boolean;
   onAdvanceExecution?: () => void;
   onPrimary: () => void;
   onAddToTasks: () => void;
@@ -330,14 +332,14 @@ function StructuredPlanMessage({
   const activeStepIndex = isExecutionComplete
     ? plan.steps.length - 1
     : Math.min(executionStepIndex ?? 0, Math.max(0, plan.steps.length - 1));
-  const primaryLabel = planPrimaryLabel(plan, isExecuting, isExecutionComplete, executionStepIndex);
+  const primaryLabel = loading ? "整理中" : planPrimaryLabel(plan, isExecuting, isExecutionComplete, executionStepIndex);
   const progressLabel = isExecutionComplete ? "三步都已经完成了" : `正在走第 ${activeStepIndex + 1} 步`;
 
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
         <p className="ai-eyebrow">{planEyebrow(plan)}</p>
-        <span className="story-chip">{plan.recommendedDuration}</span>
+        <span className="story-chip">{loading ? "整理中" : plan.recommendedDuration}</span>
       </div>
       <p className="mt-3 text-sm leading-6 text-ink">{content}</p>
       <div className="mt-4 space-y-4">
@@ -369,10 +371,12 @@ function StructuredPlanMessage({
         </div>
         <div className="border-t border-black/[0.08] pt-4">
           <p className="ai-mini-title">{isCompanionExecutionPlan ? "执行进度" : "下一步"}</p>
-          <p className="mt-2 text-sm leading-6 text-ink">{isCompanionExecutionPlan ? progressLabel : plan.nextAction}</p>
+          <p className="mt-2 text-sm leading-6 text-ink">{loading ? plan.nextAction : isCompanionExecutionPlan ? progressLabel : plan.nextAction}</p>
           {isCompanionExecutionPlan ? (
             <p className="mt-1 text-sm leading-6 text-mist">
-              {!isExecuting
+              {loading
+                ? "等我把结果整理完整后，按钮就可以继续用了。"
+                : !isExecuting
                 ? "这类生活任务更适合直接开始做，不需要再回到输入框。"
                 : isExecutionComplete
                   ? "如果你想把它正式记下来，可以再点一次加入待办。"
@@ -385,15 +389,15 @@ function StructuredPlanMessage({
         <button
           type="button"
           className="story-button w-auto px-4 py-3"
-          disabled={isCompanionExecutionPlan && isExecutionComplete}
+          disabled={loading || (isCompanionExecutionPlan && isExecutionComplete)}
           onClick={isCompanionExecutionPlan && isExecuting && !isExecutionComplete && onAdvanceExecution ? onAdvanceExecution : onPrimary}
         >
           {primaryLabel}
         </button>
-        <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onAddToTasks}>
+        <button type="button" className="story-button-secondary w-auto px-4 py-3" disabled={loading} onClick={onAddToTasks}>
           加入待办
         </button>
-        <button type="button" className="story-button-secondary w-auto px-4 py-3" onClick={onSecondary}>
+        <button type="button" className="story-button-secondary w-auto px-4 py-3" disabled={loading} onClick={onSecondary}>
           重新整理
         </button>
       </div>
@@ -1311,6 +1315,7 @@ export default function App() {
                               content={message.content}
                               plan={message.structuredPlan}
                               executionStepIndex={companionExecutionSteps[message.id]}
+                              loading={message.streaming}
                               onPrimary={() => {
                                 if (message.structuredPlan?.planKind === "lifeTask" || message.structuredPlan?.nextRoute === "companion") {
                                   startCompanionExecution(message.id);

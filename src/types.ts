@@ -16,6 +16,7 @@ export type TaskStatus = "todo" | "done";
 export type Rarity = "N" | "R" | "SR";
 export type AICardType = "journeyPlan" | "focusRecap" | "resourceAdvice" | "contextHint";
 export type CompanionAIAction = "message" | "tasks" | "plan" | "idea";
+export type CompanionStreamMode = "text" | "card";
 export type AgentStatus = "idle" | "thinking" | "awaiting_confirmation" | "acting" | "done" | "blocked";
 export type AgentTraceStatus = "done" | "pending" | "skipped" | "failed";
 export type AgentToolName = "createTasks" | "setRoute" | "startFocus" | "createIdea" | "selectPet" | "claimRecommended" | "noop";
@@ -88,6 +89,7 @@ export interface CompanionMessage {
   createdAt: number;
   petName?: string;
   aiSource?: "model" | "fallback";
+  streaming?: boolean;
   relatedTaskIds?: string[];
   quoteRef?: string;
   structuredPlan?: StructuredPlan;
@@ -218,6 +220,7 @@ export interface CompanionAIRequest {
   action: CompanionAIAction;
   draft: string;
   context: CompanionAIContext;
+  streamMode?: CompanionStreamMode;
 }
 
 export interface CompanionAIResponse {
@@ -232,7 +235,7 @@ export interface CompanionAIResponse {
     body: string;
   };
   quoteRef?: string;
-  source: "model";
+  source: "model" | "fallback";
 }
 
 export interface BattleState {

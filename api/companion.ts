@@ -23,7 +23,7 @@ const ALLOWED_ROUTES: RouteKey[] = ["home", "focus", "companion", "pets", "explo
 const ALLOWED_MESSAGE_TYPES: MessageType[] = ["text", "taskCard", "focusPlan", "reward", "recap", "imageCard", "systemEvent", "structuredPlan"];
 const ALLOWED_TOOL_NAMES: AgentToolName[] = ["createTasks", "setRoute", "startFocus", "createIdea", "selectPet", "claimRecommended", "noop"];
 let localEnvCache: Record<string, string> | null = null;
-type DraftIntent = "story" | "start" | "reward" | "rest" | "explore" | "recap" | "greeting" | "capability" | "gratitude" | "distracted" | "general";
+type DraftIntent = "story" | "start" | "reward" | "rest" | "modeChoice" | "explore" | "recap" | "greeting" | "capability" | "gratitude" | "distracted" | "general";
 
 function isTaskOrientedIntent(intent: DraftIntent): boolean {
   return ["story", "start", "reward", "rest", "explore"].includes(intent);
@@ -406,6 +406,51 @@ function buildFallbackStructuredPlan(draft: string, steps: string[]): Structured
   };
 }
 
+function buildServerFallbackResponse(payload: CompanionAIRequest, reason: string): CompanionAIResponse {
+  const steps = inferTaskTitlesFromDraft(payload.draft);
+  const plan = buildFallbackStructuredPlan(payload.draft, steps);
+
+  console.warn("[companion] using_server_fallback", {
+    action: payload.action,
+    draft: payload.draft.slice(0, 120),
+    reason,
+  });
+
+  if (payload.action === "idea") {
+    return {
+      content: "真实整理刚刚有点打结，我先把这句话收成一条灵感，之后你还可以继续改。",
+      note: {
+        title: payload.draft.slice(0, 14) || "新的灵感",
+        body: payload.draft,
+      },
+      quoteRef: "从当前输入收进灵感",
+      source: "fallback",
+    };
+  }
+
+  if (payload.action === "tasks") {
+    return {
+      content: "真实整理刚刚有点打结，我先按演示模式把它拆成三步，你可以直接加入待办。",
+      structuredPlan: plan,
+      tasks: steps,
+      source: "fallback",
+    };
+  }
+
+  if (payload.action === "plan" || /(?:拆|三步|3\s*步|步骤)/u.test(payload.draft)) {
+    return {
+      content: "真实整理刚刚有点打结，我先把这件事拆成一张顺手的小计划。",
+      structuredPlan: plan,
+      source: "fallback",
+    };
+  }
+
+  return {
+    content: "真实整理刚刚有点打结，我先切回演示整理模式。你可以继续说，我会接着帮你理顺。",
+    source: "fallback",
+  };
+}
+
 export function parseRequestBody(value: unknown): CompanionAIRequest | null {
   if (!isRecord(value)) return null;
 
@@ -424,6 +469,7 @@ export function parseRequestBody(value: unknown): CompanionAIRequest | null {
     action,
     draft: value.draft.trim(),
     context,
+    ...(value.streamMode === "text" || value.streamMode === "card" ? { streamMode: value.streamMode } : {}),
   };
 }
 
@@ -543,6 +589,11 @@ function detectDraftIntent(draft: string): DraftIntent {
 
   if (/(奖励|能量|兑换|领奖|晶石)/u.test(normalized)) {
     return "reward";
+  }
+
+  if (/(判断|适合|该不该|要不要|先).*(专注|热身|休息|整理)/u.test(normalized)
+    && /(专注|热身|休息)/u.test(normalized)) {
+    return "modeChoice";
   }
 
   if (/(休息|累|热身|缓一缓|状态不好)/u.test(normalized)) {
@@ -725,6 +776,7 @@ function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContex
     start: "用户是在问现在该从哪一步开始。请优先给一个具体起点，而不是把整条流程都重讲一遍；必要时附带 structuredPlan。",
     reward: "用户重点在奖励和能量怎么接进主线。请先回答这个问题本身；只有在确实需要时才附带 structuredPlan。",
     rest: "用户更需要低压力起步。请优先推荐更轻的下一步，不要默认 25 分钟深度专注；只有在确实需要时才附带 structuredPlan。",
+    modeChoice: "用户是在让你判断现在更适合先专注、热身还是休息整理。请只用自然回复给一个明确推荐和一句理由，不要输出 structuredPlan、focusBrief 或 toolCalls。",
     explore: "用户更关心宠物、探索或地图。请先顺着探索和陪伴来回答；只有在确实需要时才附带 structuredPlan。",
     general: "用户只是来和你说一句话。先理解他说的是什么。若问题还不够具体，可以轻轻追问一句；不要默认生成 structuredPlan。",
   };
@@ -952,6 +1004,11 @@ export async function POST(request: Request): Promise<Response> {
       error: message,
       stack: error instanceof Error ? error.stack : undefined,
     });
+
+    if (payload) {
+      return Response.json(buildServerFallbackResponse(payload, message));
+    }
+
     return Response.json({ error: message }, { status: 500 });
   }
 }

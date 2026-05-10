@@ -90,6 +90,8 @@ export interface CompanionMessage {
   petName?: string;
   aiSource?: "model" | "fallback";
   streaming?: boolean;
+  sourceDraft?: string;
+  canCreateCard?: boolean;
   relatedTaskIds?: string[];
   quoteRef?: string;
   structuredPlan?: StructuredPlan;

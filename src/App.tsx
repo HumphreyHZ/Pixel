@@ -571,6 +571,7 @@ export default function App() {
     addPlanStepsToTasks,
     runAiAction,
     sendDraftMessage,
+    generateTaskCardFromMessage,
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,
@@ -1336,7 +1337,21 @@ export default function App() {
                               onSecondary={generateJourneyPlan}
                             />
                           ) : (
-                            <p className="text-sm leading-6 text-ink">{message.content}</p>
+                            <>
+                              <p className="text-sm leading-6 text-ink">{message.content}</p>
+                              {message.role === "pet" && message.type === "text" && message.canCreateCard && message.sourceDraft ? (
+                                <div className="mt-4 flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    className="story-button-secondary w-auto px-4 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                                    disabled={companionLoading}
+                                    onClick={() => generateTaskCardFromMessage(message.sourceDraft ?? "")}
+                                  >
+                                    生成任务卡
+                                  </button>
+                                </div>
+                              ) : null}
+                            </>
                           )}
                         </div>
                       </article>

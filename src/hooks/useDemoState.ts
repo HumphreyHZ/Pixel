@@ -612,17 +612,8 @@ function isModeChoiceDraft(draft: string): boolean {
 }
 
 function getCompanionStreamMode(action: CompanionAIAction, draft: string): CompanionStreamMode {
-  const normalized = draft.trim();
   if (action !== "message") return "card";
-  if (isModeChoiceDraft(normalized)) return "text";
-
-  const intent = detectLocalCompanionIntent(normalized);
-  if (["greeting", "capability", "gratitude", "rest"].includes(intent)) return "text";
-
-  return /(拆成|分成|列出|三步|3\s*步|步骤|待办|安排|排一下|主线|闭环|从哪开始|下一步|先做什么|规划|路线|存成灵感|收进灵感|复盘|开始第一步)/u
-    .test(normalized)
-    ? "card"
-    : "text";
+  return "text";
 }
 
 function getLatestMeaningfulCompanionGoal(currentState: DemoState): string | null {
@@ -665,6 +656,35 @@ function isGoalBearingCompanionDraft(draft: string): boolean {
   }
 
   return /(今天|我要|我想|需要|准备|计划|帮我|给.+(洗澡|遛|做|买|整理|收拾|打扫)|写|改|做|整理|学习|工作|洗澡|遛狗|做饭|打扫|收拾)/u.test(normalized);
+}
+
+function shouldOfferCompanionCardAction(draft: string): boolean {
+  const normalized = draft.trim();
+  if (!normalized || isModeChoiceDraft(normalized) || isLowSignalCompanionDraft(normalized)) {
+    return false;
+  }
+
+  const intent = detectLocalCompanionIntent(normalized);
+  if (["greeting", "capability", "gratitude", "rest"].includes(intent)) {
+    return false;
+  }
+
+  return Boolean(detectExplicitCompanionAction(normalized))
+    || shouldGenerateStructuredReply(normalized)
+    || isGoalBearingCompanionDraft(normalized);
+}
+
+function getCompanionCardActionForDraft(draft: string): CompanionAIAction {
+  const explicitAction = detectExplicitCompanionAction(draft);
+  if (explicitAction === "tasks" || explicitAction === "plan") {
+    return explicitAction;
+  }
+
+  if (/(拆|三步|3\s*步|步骤|待办|洗澡|遛狗|遛猫|做饭|打扫|收拾|买|取|寄)/u.test(draft)) {
+    return "tasks";
+  }
+
+  return "plan";
 }
 
 function createActiveGoalFromCompanionResult(draft: string, plan?: StructuredPlan): string {
@@ -1017,11 +1037,17 @@ function describeCompanionFallbackReason(error: unknown): string {
   return "真实整理这次没有顺利完成，我先切回演示模式。";
 }
 
-async function requestCompanionModel(action: CompanionAIAction, draft: string, currentState: DemoState): Promise<CompanionAIResponse> {
+async function requestCompanionModel(
+  action: CompanionAIAction,
+  draft: string,
+  currentState: DemoState,
+  streamMode?: CompanionStreamMode,
+): Promise<CompanionAIResponse> {
   const payload: CompanionAIRequest = {
     action,
     draft,
     context: buildCompanionContext(currentState),
+    ...(streamMode ? { streamMode } : {}),
   };
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 15000);
@@ -1922,6 +1948,8 @@ export function useDemoState() {
         content: result.content,
         createdAt,
         aiSource: result.source,
+        sourceDraft: draft,
+        canCreateCard: shouldOfferCompanionCardAction(draft),
       }));
     }
 
@@ -2085,7 +2113,7 @@ export function useDemoState() {
         });
       } catch (streamError) {
         console.warn("[companion-stream] falling back to json endpoint", streamError);
-        modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
+        modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot, streamMode);
       }
 
       setAiFallbackReason(null);
@@ -2143,29 +2171,9 @@ export function useDemoState() {
       };
     }
 
-    const explicitAction = detectExplicitCompanionAction(draft);
-    if (explicitAction) {
-      return {
-        action: explicitAction,
-        requestDraft: draft,
-        userMessageContent: draft,
-      };
-    }
-
-    const followUpAction = detectFollowUpCompanionAction(draft);
-    const baseGoal = getLatestMeaningfulCompanionGoal(currentState);
-
-    if (!followUpAction || !baseGoal) {
-      return {
-        action: requestedAction,
-        requestDraft: draft,
-        userMessageContent: draft,
-      };
-    }
-
     return {
-      action: followUpAction,
-      requestDraft: `${baseGoal}。用户刚刚补充：${draft}`,
+      action: requestedAction,
+      requestDraft: draft,
       userMessageContent: draft,
     };
   }
@@ -2494,11 +2502,21 @@ export function useDemoState() {
   function sendDraftMessage(): void {
     const draft = state.draft.trim();
     if (!draft) return;
-    const explicitAction = detectExplicitCompanionAction(draft);
-    void performCompanionAction(explicitAction ?? "message", {
+    void performCompanionAction("message", {
       draft,
       addUserMessage: true,
       clearDraft: true,
+    });
+  }
+
+  function generateTaskCardFromMessage(sourceDraft: string): void {
+    const draft = sourceDraft.trim();
+    if (!draft || companionLoading) return;
+
+    void performCompanionAction(getCompanionCardActionForDraft(draft), {
+      draft,
+      addUserMessage: false,
+      clearDraft: false,
     });
   }
 
@@ -3005,6 +3023,7 @@ export function useDemoState() {
     addPlanStepsToTasks,
     runAiAction,
     sendDraftMessage,
+    generateTaskCardFromMessage,
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,

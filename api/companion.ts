@@ -416,6 +416,13 @@ function buildServerFallbackResponse(payload: CompanionAIRequest, reason: string
     reason,
   });
 
+  if (payload.streamMode === "text") {
+    return {
+      content: "真实整理刚刚有点打结，我先用文字把你接住。你可以继续说，或者点生成任务卡再拆成可执行步骤。",
+      source: "fallback",
+    };
+  }
+
   if (payload.action === "idea") {
     return {
       content: "真实整理刚刚有点打结，我先把这句话收成一条灵感，之后你还可以继续改。",
@@ -748,8 +755,24 @@ function polishStructuredPlan(
   };
 }
 
-function buildSystemPrompt(action: CompanionAIAction, context: CompanionAIContext, draft: string): string {
+function buildSystemPrompt(payload: CompanionAIRequest): string {
+  const { action, context, draft, streamMode } = payload;
   const intent = detectDraftIntent(draft);
+
+  if (streamMode === "text") {
+    return [
+      "你是像素宠物专注 app 的陪伴整理助手，语气治愈、聪明、有陪伴感。",
+      `当前陪伴：${context.activePet.name}。只有用户说 app 内陪伴、探索、喂食、图鉴或互动时才使用这个名字；现实猫狗不要替换成陪伴名。`,
+      "本次只做快速文字回复，不生成卡片，不返回 structuredPlan、focusBrief、tasks 或 toolCalls。",
+      "即使用户说“拆成 3 步”或“安排顺序”，也先自然接住这句话，告诉他可以继续生成任务卡。",
+      "回复 1 到 2 句中文，短一点，有下一步感。",
+      "禁止出现：面试官、评审、作品集展示、demo、录屏、测试、招聘、用户、任务助手。",
+      `当前目标：${context.agent.activeGoal ?? "暂无固定目标"}。`,
+      `json: {"content":"..."}`,
+      "只输出 JSON，不要 markdown、解释或代码块。",
+    ].join("\n");
+  }
+
   const basePrompt = [
     "你是像素宠物专注 app 的陪伴整理助手，语气治愈、聪明、有陪伴感。",
     `当前陪伴：${context.activePet.name}。只有用户说 app 内陪伴、探索、喂食、图鉴或互动时才使用这个名字；现实猫狗不要替换成陪伴名。`,
@@ -900,7 +923,7 @@ async function requestDeepSeekContent(
         messages: [
           {
             role: "system",
-            content: `${buildSystemPrompt(payload.action, payload.context, payload.draft)}${retryNote}`,
+            content: `${buildSystemPrompt(payload)}${retryNote}`,
           },
           {
             role: "user",
@@ -963,6 +986,13 @@ export async function callDeepSeek(payload: CompanionAIRequest): Promise<Compani
       const parsed = parseModelResult(parsedValue, payload.action);
       if (!parsed) {
         throw new Error("invalid_model_json");
+      }
+
+      if (payload.streamMode === "text") {
+        return normalizeParsedResultForDraft(payload, {
+          content: parsed.content,
+          source: "model",
+        });
       }
 
       return normalizeParsedResultForDraft(payload, parsed);

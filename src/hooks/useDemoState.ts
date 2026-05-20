@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { seedState } from "../data/seed";
 import type {
   AICard,
@@ -114,13 +114,41 @@ function createAgentSnapshot(currentState: DemoState): AgentObservedSnapshot {
 }
 
 function normalizeAgentState(currentState: DemoState, nextAgent?: Partial<AgentSessionState>): AgentSessionState {
+  const currentAgent = currentState.agent;
+  const pickAgentField = <K extends keyof AgentSessionState>(
+    key: K,
+    fallback: AgentSessionState[K],
+  ): AgentSessionState[K] => {
+    if (nextAgent && Object.prototype.hasOwnProperty.call(nextAgent, key)) {
+      const nextValue = nextAgent[key];
+      return nextValue === undefined ? (currentAgent?.[key] ?? fallback) : nextValue;
+    }
+
+    return currentAgent?.[key] ?? fallback;
+  };
+
   return {
-    agentStatus: nextAgent?.agentStatus ?? currentState.agent?.agentStatus ?? "idle",
-    activeGoal: nextAgent?.activeGoal ?? currentState.agent?.activeGoal ?? null,
-    activePlan: nextAgent?.activePlan ?? currentState.agent?.activePlan ?? null,
-    pendingAction: nextAgent?.pendingAction ?? currentState.agent?.pendingAction ?? null,
-    agentTrace: nextAgent?.agentTrace ?? currentState.agent?.agentTrace ?? [],
-    lastObservedSnapshot: nextAgent?.lastObservedSnapshot ?? currentState.agent?.lastObservedSnapshot ?? null,
+    agentStatus: pickAgentField("agentStatus", "idle"),
+    activeGoal: pickAgentField("activeGoal", null),
+    activePlan: pickAgentField("activePlan", null),
+    pendingAction: pickAgentField("pendingAction", null),
+    agentTrace: pickAgentField("agentTrace", []),
+    lastObservedSnapshot: pickAgentField("lastObservedSnapshot", null),
+  };
+}
+
+function clearCompanionMemoryFromState(currentState: DemoState): DemoState {
+  return {
+    ...currentState,
+    messages: [],
+    agent: normalizeAgentState(currentState, {
+      agentStatus: "idle",
+      activeGoal: null,
+      activePlan: null,
+      pendingAction: null,
+      agentTrace: [],
+      lastObservedSnapshot: null,
+    }),
   };
 }
 
@@ -656,35 +684,6 @@ function isGoalBearingCompanionDraft(draft: string): boolean {
   }
 
   return /(今天|我要|我想|需要|准备|计划|帮我|给.+(洗澡|遛|做|买|整理|收拾|打扫)|写|改|做|整理|学习|工作|洗澡|遛狗|做饭|打扫|收拾)/u.test(normalized);
-}
-
-function shouldOfferCompanionCardAction(draft: string): boolean {
-  const normalized = draft.trim();
-  if (!normalized || isModeChoiceDraft(normalized) || isLowSignalCompanionDraft(normalized)) {
-    return false;
-  }
-
-  const intent = detectLocalCompanionIntent(normalized);
-  if (["greeting", "capability", "gratitude", "rest"].includes(intent)) {
-    return false;
-  }
-
-  return Boolean(detectExplicitCompanionAction(normalized))
-    || shouldGenerateStructuredReply(normalized)
-    || isGoalBearingCompanionDraft(normalized);
-}
-
-function getCompanionCardActionForDraft(draft: string): CompanionAIAction {
-  const explicitAction = detectExplicitCompanionAction(draft);
-  if (explicitAction === "tasks" || explicitAction === "plan") {
-    return explicitAction;
-  }
-
-  if (/(拆|三步|3\s*步|步骤|待办|洗澡|遛狗|遛猫|做饭|打扫|收拾|买|取|寄)/u.test(draft)) {
-    return "tasks";
-  }
-
-  return "plan";
 }
 
 function createActiveGoalFromCompanionResult(draft: string, plan?: StructuredPlan): string {
@@ -1287,6 +1286,30 @@ function createTasksFromDraft(draft: string): string[] {
   return ["确定今天的专注主题", "完成一轮专注领取晶石", "把奖励带去奖励页或探索继续展开"];
 }
 
+function extractNumberedStepsFromText(content: string): string[] {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  const lineSteps = normalized
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[1-3][.、)]|[①②③])\s*/u, "").trim())
+    .filter((line, index) => {
+      const originalLine = normalized.split("\n")[index] ?? "";
+      return /^(?:\s*(?:[1-3][.、)]|[①②③]))/u.test(originalLine) && line.length > 0;
+    });
+
+  if (lineSteps.length >= 3) {
+    return lineSteps.slice(0, 3);
+  }
+
+  const inlineMatch = normalized.match(/(?:^|\s)(?:1[.、)]|①)\s*(.+?)\s+(?:2[.、)]|②)\s*(.+?)\s+(?:3[.、)]|③)\s*(.+)$/u);
+  if (!inlineMatch) return [];
+
+  return inlineMatch
+    .slice(1, 4)
+    .map((step) => step.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
 function createPlanFromDraft(draft: string): string[] {
   if (draft.includes("步数") || draft.includes("能量") || draft.includes("银行") || draft.includes("奖励")) {
     return ["25 分钟专注推进", "5 分钟领取步数能量", "10 分钟兑换晶石并探索"];
@@ -1544,6 +1567,9 @@ function loadState(): DemoState {
 
 export function useDemoState() {
   const [state, setState] = useState<DemoState>(loadState);
+  const companionResetVersionRef = useRef(0);
+  const pendingCompanionClearVersionRef = useRef(0);
+  const companionRequestSeqRef = useRef(0);
   const [now, setNow] = useState<number>(Date.now());
   const [companionLoading, setCompanionLoading] = useState(false);
   const [aiErrorMode, setAiErrorMode] = useState(false);
@@ -1558,6 +1584,29 @@ export function useDemoState() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state]);
+
+  useEffect(() => {
+    if (pendingCompanionClearVersionRef.current === 0) return;
+
+    const companionMemoryIsClear =
+      state.messages.length === 0 &&
+      !state.agent.activeGoal &&
+      !state.agent.activePlan &&
+      !state.agent.pendingAction &&
+      state.agent.agentTrace.length === 0 &&
+      !state.agent.lastObservedSnapshot;
+
+    if (companionMemoryIsClear) {
+      pendingCompanionClearVersionRef.current = 0;
+    }
+  }, [
+    state.messages.length,
+    state.agent.activeGoal,
+    state.agent.activePlan,
+    state.agent.pendingAction,
+    state.agent.agentTrace.length,
+    state.agent.lastObservedSnapshot,
+  ]);
 
   useEffect(() => {
     if (!state.focus.running) return;
@@ -1948,8 +1997,6 @@ export function useDemoState() {
         content: result.content,
         createdAt,
         aiSource: result.source,
-        sourceDraft: draft,
-        canCreateCard: shouldOfferCompanionCardAction(draft),
       }));
     }
 
@@ -2022,20 +2069,32 @@ export function useDemoState() {
     const draft = options.draft.trim();
     if (!draft) return;
 
-    const snapshot = state;
+    const shouldStartFromClearedMemory = pendingCompanionClearVersionRef.current !== 0;
+    const requestResetVersion = companionResetVersionRef.current;
+    const requestSeq = companionRequestSeqRef.current + 1;
+    companionRequestSeqRef.current = requestSeq;
+    const isStaleCompanionRequest = () =>
+      companionResetVersionRef.current !== requestResetVersion || companionRequestSeqRef.current !== requestSeq;
+    const snapshot = shouldStartFromClearedMemory ? clearCompanionMemoryFromState(state) : state;
     const resolvedRequest = resolveCompanionRequest(action, draft, snapshot);
     const streamMode = getCompanionStreamMode(resolvedRequest.action, resolvedRequest.requestDraft);
     const streamMessageId = createId("msg");
     let hasStreamDelta = false;
     const patchStreamMessage = (nextContent: string, append = false) => {
-      setState((current) => ({
-        ...current,
-        messages: current.messages.map((message) =>
-          message.id === streamMessageId
-            ? { ...message, content: append ? `${message.content}${nextContent}` : nextContent }
-            : message,
-        ),
-      }));
+      if (isStaleCompanionRequest()) return;
+
+      setState((current) => {
+        if (isStaleCompanionRequest()) return current;
+
+        return {
+          ...current,
+          messages: current.messages.map((message) =>
+            message.id === streamMessageId
+              ? { ...message, content: append ? `${message.content}${nextContent}` : nextContent }
+              : message,
+          ),
+        };
+      });
     };
 
     setCompanionLoading(true);
@@ -2047,9 +2106,12 @@ export function useDemoState() {
       startedAt: Date.now(),
     });
     setState((current) => {
+      if (isStaleCompanionRequest()) return current;
+
+      const baseState = shouldStartFromClearedMemory ? clearCompanionMemoryFromState(current) : current;
       const createdAt = Date.now();
       const streamingMessage = streamMode === "card"
-        ? createPetMessage(current, {
+        ? createPetMessage(baseState, {
           id: streamMessageId,
           type: "structuredPlan",
           content: "正在把这句话整理成可执行结果...",
@@ -2058,7 +2120,7 @@ export function useDemoState() {
           streaming: true,
           structuredPlan: createStreamingSkeletonPlan(resolvedRequest.action, resolvedRequest.requestDraft),
         })
-        : createPetMessage(current, {
+        : createPetMessage(baseState, {
           id: streamMessageId,
           type: "text",
           content: "正在理解这句话...",
@@ -2067,7 +2129,7 @@ export function useDemoState() {
           streaming: true,
         });
       const nextMessages = [
-        ...current.messages,
+        ...baseState.messages,
         ...(options.addUserMessage
           ? [{
             id: createId("msg"),
@@ -2081,19 +2143,23 @@ export function useDemoState() {
       ];
 
       return {
-        ...current,
-        draft: options.clearDraft ? "" : current.draft,
+        ...baseState,
+        draft: options.clearDraft ? "" : baseState.draft,
         messages: nextMessages,
-        agent: normalizeAgentState(current, {
+        agent: normalizeAgentState(baseState, {
           agentStatus: "thinking",
-          activeGoal: current.agent.activeGoal ?? (isGoalBearingCompanionDraft(resolvedRequest.requestDraft) ? trimActiveGoal(resolvedRequest.requestDraft) : null),
+          activeGoal: baseState.agent.activeGoal ?? (isGoalBearingCompanionDraft(resolvedRequest.requestDraft) ? trimActiveGoal(resolvedRequest.requestDraft) : null),
           pendingAction: null,
         }),
       };
     });
+    if (shouldStartFromClearedMemory && pendingCompanionClearVersionRef.current === requestResetVersion) {
+      pendingCompanionClearVersionRef.current = 0;
+    }
 
     try {
       await waitForNextPaint();
+      if (isStaleCompanionRequest()) return;
 
       let modelResult: CompanionAIResponse;
       try {
@@ -2116,32 +2182,40 @@ export function useDemoState() {
         modelResult = await requestCompanionModel(resolvedRequest.action, resolvedRequest.requestDraft, snapshot, streamMode);
       }
 
+      if (isStaleCompanionRequest()) return;
       setAiFallbackReason(null);
-      setState((current) =>
-        applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, modelResult, {
+      setState((current) => {
+        if (isStaleCompanionRequest()) return current;
+
+        return applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, modelResult, {
           addUserMessage: false,
           clearDraft: false,
           userMessageContent: resolvedRequest.userMessageContent,
           replaceMessageId: streamMessageId,
-        }),
-      );
+        });
+      });
     } catch (error) {
+      if (isStaleCompanionRequest()) return;
       const fallbackResult = createFallbackCompanionResult(resolvedRequest.action, resolvedRequest.requestDraft, snapshot);
       const fallbackReason = describeCompanionFallbackReason(error);
       setAiErrorMode(true);
       setAiFallbackReason(fallbackReason);
-      setState((current) =>
-        applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, fallbackResult, {
+      setState((current) => {
+        if (isStaleCompanionRequest()) return current;
+
+        return applyCompanionActionResult(current, resolvedRequest.action, resolvedRequest.requestDraft, fallbackResult, {
           addUserMessage: false,
           clearDraft: false,
           userMessageContent: resolvedRequest.userMessageContent,
           fallbackNoticeContent: `${FALLBACK_NOTICE} 原因：${fallbackReason}`,
           replaceMessageId: streamMessageId,
-        }),
-      );
+        });
+      });
     } finally {
-      setCompanionLoading(false);
-      setCompanionThinking(null);
+      if (!isStaleCompanionRequest()) {
+        setCompanionLoading(false);
+        setCompanionThinking(null);
+      }
     }
   }
 
@@ -2509,17 +2583,6 @@ export function useDemoState() {
     });
   }
 
-  function generateTaskCardFromMessage(sourceDraft: string): void {
-    const draft = sourceDraft.trim();
-    if (!draft || companionLoading) return;
-
-    void performCompanionAction(getCompanionCardActionForDraft(draft), {
-      draft,
-      addUserMessage: false,
-      clearDraft: false,
-    });
-  }
-
   function confirmPendingAgentAction(): void {
     setState((current) => {
       const pendingAction = current.agent.pendingAction;
@@ -2605,21 +2668,25 @@ export function useDemoState() {
   }
 
   function clearMessages(): void {
+    companionResetVersionRef.current += 1;
+    pendingCompanionClearVersionRef.current = companionResetVersionRef.current;
+    companionRequestSeqRef.current += 1;
+    setCompanionLoading(false);
+    setCompanionThinking(null);
     setAiErrorMode(false);
+    setAiFallbackReason(null);
     setState((current) => {
-      if (current.messages.length === 0 && current.agent.agentTrace.length === 0 && !current.agent.pendingAction) return current;
-      return finalizeState({
-        ...current,
-        messages: [],
-        agent: normalizeAgentState(current, {
-          agentStatus: "idle",
-          activeGoal: null,
-          activePlan: null,
-          pendingAction: null,
-          agentTrace: [],
-          lastObservedSnapshot: null,
-        }),
-      });
+      const companionMemoryIsClear =
+        current.messages.length === 0 &&
+        !current.agent.activeGoal &&
+        !current.agent.activePlan &&
+        !current.agent.pendingAction &&
+        current.agent.agentTrace.length === 0 &&
+        !current.agent.lastObservedSnapshot;
+
+      if (companionMemoryIsClear) return current;
+
+      return finalizeState(clearCompanionMemoryFromState(current));
     });
   }
 
@@ -2697,6 +2764,49 @@ export function useDemoState() {
         ...current.agent,
         activeGoal: plan.goalSummary,
         activePlan: plan,
+        pendingAction: null,
+        agentStatus: "done",
+        agentTrace: pushAgentTrace(current.agent.agentTrace, dispatch.trace),
+        lastObservedSnapshot: createAgentSnapshot(dispatch.nextState),
+      });
+
+      return finalizeState({
+        ...dispatch.nextState,
+        messages: nextMessages,
+        agent: nextAgent,
+      });
+    });
+  }
+
+  function addMessageStepsToTasks(messageId: string): void {
+    setState((current) => {
+      const targetMessage = current.messages.find((message) => message.id === messageId);
+      if (!targetMessage || targetMessage.role !== "pet" || targetMessage.streaming) return current;
+
+      const titles = extractNumberedStepsFromText(targetMessage.content);
+      if (titles.length !== 3) return current;
+
+      const createdAt = Date.now();
+      const dispatch = runAgentToolCall(current, {
+        name: "createTasks",
+        args: { titles },
+        requiresConfirmation: false,
+        reason: "把这三条文字步骤放进待办里，后面就能直接照着做。",
+      }, createdAt, true);
+      const linkedTaskIds = titles
+        .map((title) => dispatch.nextState.tasks.find((task) => task.title.trim().toLowerCase() === title.trim().toLowerCase())?.id)
+        .filter((taskId): taskId is string => Boolean(taskId));
+
+      const nextMessages = dispatch.nextState.messages.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              relatedTaskIds: Array.from(new Set([...(message.relatedTaskIds ?? []), ...linkedTaskIds])),
+            }
+          : message,
+      );
+      const nextAgent = normalizeAgentState(dispatch.nextState, {
+        ...current.agent,
         pendingAction: null,
         agentStatus: "done",
         agentTrace: pushAgentTrace(current.agent.agentTrace, dispatch.trace),
@@ -3021,9 +3131,9 @@ export function useDemoState() {
     removeNote,
     convertNoteToTasks,
     addPlanStepsToTasks,
+    addMessageStepsToTasks,
     runAiAction,
     sendDraftMessage,
-    generateTaskCardFromMessage,
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,

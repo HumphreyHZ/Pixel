@@ -35,28 +35,93 @@ function resolveStreamMode(payload: CompanionAIRequest): CompanionStreamMode {
   return shouldRequestStructuredFinal(payload) ? "card" : "text";
 }
 
+function isStepBreakdownDraft(draft: string): boolean {
+  const normalized = draft.trim();
+  return /((拆|分|列|整理).{0,10}([3三]\s*(步|个步骤|个动作|件事|条)|步骤|小步|待办)|拆吧|拆一下|分一下|列一下|拆开|拆顺)/u.test(normalized);
+}
+
+function shouldStreamThreeStepAnswer(payload: CompanionAIRequest): boolean {
+  if (payload.action !== "message") return false;
+  if (isStepBreakdownDraft(payload.draft)) return true;
+
+  return Boolean(
+    payload.context.agent?.activeGoal
+    && /(继续|然后呢|下一步|接着|往下).{0,8}(拆|分|列|整理)?/u.test(payload.draft.trim()),
+  );
+}
+
+function isCompanionFlowDraft(draft: string): boolean {
+  return /(专注|奖励|能量|步数|晶石|探索|宠物|图鉴|喂食|互动|地图|陪伴|主线|闭环|领奖|对战|商店)/u.test(draft);
+}
+
+function getRealLifePetLabel(draft: string): string | null {
+  if (/(猫|猫咪|猫猫|小猫)/u.test(draft)) return "猫咪";
+  if (/(狗|狗狗|小狗|遛狗)/u.test(draft)) return "狗狗";
+  return null;
+}
+
+function shouldAvoidActivePetBinding(payload: CompanionAIRequest): boolean {
+  return Boolean(getRealLifePetLabel(payload.draft)) && !isCompanionFlowDraft(payload.draft);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sanitizeStreamedCompanionText(payload: CompanionAIRequest, text: string): string {
+  if (!shouldAvoidActivePetBinding(payload)) return text;
+
+  const activePetName = payload.context.activePet?.name;
+  const lifePetLabel = getRealLifePetLabel(payload.draft);
+  if (!activePetName || !lifePetLabel) return text;
+
+  return text
+    .replace(new RegExp(escapeRegExp(activePetName), "g"), lifePetLabel)
+    .replace(/陪伴小羊/g, lifePetLabel)
+    .replace(/陪伴宠物/g, lifePetLabel);
+}
+
 function buildStreamingPrompt(payload: CompanionAIRequest): string {
   const activeGoal = payload.context.agent?.activeGoal
     ? `当前目标：${payload.context.agent.activeGoal}。`
     : "当前没有固定目标。";
   const activePetName = payload.context.activePet?.name ?? "当前陪伴";
+  const shouldAnswerWithSteps = shouldStreamThreeStepAnswer(payload);
+  const activePetContext = shouldAvoidActivePetBinding(payload)
+    ? "当前问题是现实猫狗照护，不要提及当前 app 陪伴，也不要代入陪伴名字。"
+    : `当前陪伴：${activePetName}。`;
+
+  if (shouldAnswerWithSteps) {
+    return [
+      "你是像素宠物专注 app 里的陪伴整理助手。",
+      "现在只输出给用户看的自然文字，不要 JSON，不要卡片字段。",
+      "用户正在要求把一件事拆成 3 步。必须直接给出三条可执行步骤，不能只说“我会帮你整理”，也不能要求用户再输入一次。",
+      "格式：先用一句短回应接住，然后换行输出 1. 2. 3. 三条步骤。",
+      "每一步都要是具体动作，围绕用户当前输入；如果输入只是“拆吧/继续/然后呢”，就沿用当前目标来拆。",
+      "现实里的猫狗就是现实宠物，不要替换成 app 当前陪伴名，也不要把猫咪写成当前陪伴。",
+      "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘。",
+      activeGoal,
+      activePetContext,
+      `用户当前输入：${payload.draft}。`,
+    ].join("\n");
+  }
 
   return [
     "你是像素宠物专注 app 里的陪伴整理助手。",
-    "现在只输出给用户看的自然回复，不要 JSON，不要 markdown，不要列表。",
+    "现在只输出给用户看的自然回复，不要 JSON，不要卡片字段。",
     "回复 1 到 2 句，语气治愈、聪明、有陪伴感。",
-    "如果后面还会生成结构化卡片，你只需要先轻轻接住这句话，告诉用户正在整理。",
+    "如果用户明确要求拆步骤，但没有说清要拆什么，就轻轻追问一句；不要假装已经拆好了。",
     "不要提及面试官、评审、作品集、展示、demo、录屏、测试、招聘。",
     "现实里的猫狗不要替换成 app 当前陪伴名。",
     activeGoal,
-    `当前陪伴：${activePetName}。`,
+    activePetContext,
     `动作类型：${payload.action}。`,
   ].join("\n");
 }
 
-function createFinalFromStreamedText(content: string): CompanionAIResponse {
+function createFinalFromStreamedText(payload: CompanionAIRequest, content: string): CompanionAIResponse {
   return {
-    content: content.trim() || "我在这儿。你说一句现在想推进的事，我会陪你把它理顺。",
+    content: sanitizeStreamedCompanionText(payload, content).trim() || "我在这儿。你说一句现在想推进的事，我会陪你把它理顺。",
     source: "model",
   };
 }
@@ -75,8 +140,8 @@ async function streamDeepSeekReply(
     },
     body: JSON.stringify({
       model,
-      temperature: 0.7,
-      max_tokens: 160,
+      temperature: shouldStreamThreeStepAnswer(payload) ? 0.35 : 0.7,
+      max_tokens: shouldStreamThreeStepAnswer(payload) ? 320 : 180,
       stream: true,
       messages: [
         {
@@ -99,7 +164,28 @@ async function streamDeepSeekReply(
   const decoder = new TextDecoder();
   let buffer = "";
   let streamedText = "";
+  let sanitizeBuffer = "";
   let firstTokenSeen = false;
+  const shouldSanitizeDeltas = shouldAvoidActivePetBinding(payload);
+  const sanitizeHoldLength = shouldSanitizeDeltas
+    ? Math.max((payload.context.activePet?.name.length ?? 0) - 1, 1)
+    : 0;
+  const flushDelta = (delta: string, force = false) => {
+    if (!shouldSanitizeDeltas) {
+      onDelta(delta);
+      return;
+    }
+
+    sanitizeBuffer = sanitizeStreamedCompanionText(payload, `${sanitizeBuffer}${delta}`);
+    if (!force && sanitizeBuffer.length <= sanitizeHoldLength) return;
+
+    const emitLength = force ? sanitizeBuffer.length : sanitizeBuffer.length - sanitizeHoldLength;
+    if (emitLength <= 0) return;
+
+    const nextDelta = sanitizeBuffer.slice(0, emitLength);
+    sanitizeBuffer = sanitizeBuffer.slice(emitLength);
+    if (nextDelta) onDelta(nextDelta);
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -118,6 +204,7 @@ async function streamDeepSeekReply(
 
       for (const dataLine of dataLines) {
         if (dataLine === "[DONE]") {
+          flushDelta("", true);
           return streamedText;
         }
 
@@ -138,11 +225,12 @@ async function streamDeepSeekReply(
         }
 
         streamedText += delta;
-        onDelta(delta);
+        flushDelta(delta);
       }
     }
   }
 
+  flushDelta("", true);
   return streamedText;
 }
 
@@ -205,7 +293,7 @@ export async function POST(request: Request): Promise<Response> {
         );
 
         sendEvent(controller, encoder, "metric", { name: "deepseek_stream_done", elapsedMs: Date.now() - startedAt });
-        const finalResult = createFinalFromStreamedText(streamedText);
+        const finalResult = createFinalFromStreamedText(streamPayload, streamedText);
         sendEvent(controller, encoder, "final", finalResult);
         sendEvent(controller, encoder, "metric", { name: "final_ready", elapsedMs: Date.now() - startedAt });
         console.info("[companion-stream] completed", {

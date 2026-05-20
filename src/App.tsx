@@ -38,6 +38,27 @@ const companionPrompts = [
   { label: "先专注还是休息", value: "我现在有点乱，帮我判断更适合先专注、先热身还是先休息整理。" },
 ] as const;
 
+function extractNumberedStepsFromText(content: string): string[] {
+  const lines = content.replace(/\r\n/g, "\n").trim().split("\n");
+  const lineSteps = lines
+    .map((line) => {
+      const match = line.match(/^\s*(?:[1-3][.、)]|[①②③])\s*(.+)$/u);
+      return match?.[1]?.trim() ?? "";
+    })
+    .filter(Boolean);
+
+  if (lineSteps.length >= 3) {
+    return lineSteps.slice(0, 3);
+  }
+
+  const inlineMatch = content
+    .replace(/\s+/g, " ")
+    .trim()
+    .match(/(?:^|\s)(?:1[.、)]|①)\s*(.+?)\s+(?:2[.、)]|②)\s*(.+?)\s+(?:3[.、)]|③)\s*(.+)$/u);
+
+  return inlineMatch ? inlineMatch.slice(1, 4).map((step) => step.trim()).filter(Boolean).slice(0, 3) : [];
+}
+
 const petRoleCopy: Record<string, string> = {
   sheep: "更适合做温和的起步陪伴，帮你把今天先走起来。",
   beagle: "更适合做推进型搭档，鼓励你快一点把主线跑完。",
@@ -541,13 +562,11 @@ function AchievementSeal({ title, description, unlocked, index, evidence }: { ti
 }
 
 export default function App() {
-  const [companionExecutionSteps, setCompanionExecutionSteps] = useState<Record<string, number>>({});
   const {
     state,
     activePet,
     selectedPreset,
     completedMinutes,
-    generateJourneyPlan,
     companionLoading,
     companionThinking,
     aiErrorMode,
@@ -568,16 +587,14 @@ export default function App() {
     clearCompletedTasks,
     removeNote,
     convertNoteToTasks,
-    addPlanStepsToTasks,
+    addMessageStepsToTasks,
     runAiAction,
     sendDraftMessage,
-    generateTaskCardFromMessage,
     confirmPendingAgentAction,
     skipPendingAgentAction,
     clearMessages,
     clearActiveGoal,
     completeActiveGoal,
-    recordPlanStepProgress,
     askPetForAdvice,
     selectPet,
     feedPet,
@@ -603,20 +620,9 @@ export default function App() {
     if (/^(你好|您好|嗨|哈喽|hi|hello|谢谢|好的|收到)[!！。.？? ]*$/iu.test(label)) return "";
     return label;
   }, [state.agent.activeGoal]);
-  const activeGoalPlanMessage = useMemo(
-    () =>
-      [...state.messages].reverse().find((message) =>
-        message.type === "structuredPlan"
-        && message.structuredPlan
-        && state.agent.activePlan
-        && message.structuredPlan.goalSummary === state.agent.activePlan.goalSummary,
-      ),
-    [state.agent.activePlan, state.messages],
-  );
-  const activeGoalStepIndex = activeGoalPlanMessage ? companionExecutionSteps[activeGoalPlanMessage.id] : undefined;
   const activeGoalProgress = useMemo(
-    () => activeGoalProgressCopy(state.agent.activePlan, activeGoalStepIndex),
-    [activeGoalStepIndex, state.agent.activePlan],
+    () => activeGoalProgressCopy(state.agent.activePlan),
+    [state.agent.activePlan],
   );
   const hasActiveStreamingMessage = useMemo(
     () =>
@@ -796,24 +802,6 @@ export default function App() {
   const focusCrystalReward = state.focus.durationMinutes * 3;
   const focusExpReward = state.focus.durationMinutes * 2;
   const focusStatusLabel = !state.focus.running ? "待开始" : canClaimFocusReward ? "可领奖" : "进行中";
-
-  function startCompanionExecution(messageId: string): void {
-    setCompanionExecutionSteps((current) => ({
-      ...current,
-      [messageId]: 0,
-    }));
-  }
-
-  function advanceCompanionExecution(messageId: string, plan: StructuredPlan): void {
-    const currentIndex = companionExecutionSteps[messageId] ?? 0;
-    recordPlanStepProgress(plan, currentIndex);
-    setCompanionExecutionSteps((current) => {
-      return {
-        ...current,
-        [messageId]: Math.min(currentIndex + 1, plan.steps.length),
-      };
-    });
-  }
 
   function focusCompanionDraft(nextStep: string): void {
     setRoute("companion");
@@ -1302,60 +1290,35 @@ export default function App() {
                 />
                 <div className="max-h-[34rem] space-y-4 overflow-y-auto pr-1">
                   {recentMessages.length > 0 ? (
-                    recentMessages.map((message) => (
-                      <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
-                        <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
-                          <span>{message.role === "user" ? "你" : (message.petName ?? activePet.name)} · {relativeTime(message.createdAt)}</span>
-                          {message.role === "pet" && aiSourceLabel(message.aiSource) ? (
-                            <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">{aiSourceLabel(message.aiSource)}</span>
+                    recentMessages.map((message) => {
+                      const numberedSteps = extractNumberedStepsFromText(message.content);
+                      const canAddStepsToTasks = message.role === "pet" && !message.streaming && numberedSteps.length === 3;
+                      const stepsAlreadyAdded = canAddStepsToTasks && (message.relatedTaskIds?.length ?? 0) > 0;
+
+                      return (
+                        <article key={message.id} className={`flex flex-col gap-2 ${message.role === "user" ? "items-end" : "items-start"}`}>
+                          <div className="flex items-center gap-2 text-[11px] font-medium text-mist">
+                            <span>{message.role === "user" ? "你" : (message.petName ?? activePet.name)} · {relativeTime(message.createdAt)}</span>
+                            {message.role === "pet" && aiSourceLabel(message.aiSource) ? (
+                              <span className="story-chip !px-2.5 !py-1 !text-[10px] !tracking-[0.08em]">{aiSourceLabel(message.aiSource)}</span>
+                            ) : null}
+                          </div>
+                          <div className={`message-card ${messageTone(message.type, message.role)}`}>
+                            <p className="whitespace-pre-line text-sm leading-6 text-ink">{message.content}</p>
+                          </div>
+                          {canAddStepsToTasks ? (
+                            <button
+                              type="button"
+                              className="story-button-secondary w-auto px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={stepsAlreadyAdded}
+                              onClick={() => addMessageStepsToTasks(message.id)}
+                            >
+                              {stepsAlreadyAdded ? "已加入待办" : "加入待办"}
+                            </button>
                           ) : null}
-                        </div>
-                        <div className={`message-card ${messageTone(message.type, message.role)}`}>
-                          {message.type === "structuredPlan" && message.structuredPlan ? (
-                            <StructuredPlanMessage
-                              content={message.content}
-                              plan={message.structuredPlan}
-                              executionStepIndex={companionExecutionSteps[message.id]}
-                              loading={message.streaming}
-                              onPrimary={() => {
-                                if (message.structuredPlan?.planKind === "lifeTask" || message.structuredPlan?.nextRoute === "companion") {
-                                  startCompanionExecution(message.id);
-                                  return;
-                                }
-                                goToRouteOrStart(message.structuredPlan?.nextRoute, message.structuredPlan?.nextAction);
-                              }}
-                              onAdvanceExecution={() => {
-                                if (message.structuredPlan) {
-                                  advanceCompanionExecution(message.id, message.structuredPlan);
-                                }
-                              }}
-                              onAddToTasks={() => {
-                                if (message.structuredPlan) {
-                                  addPlanStepsToTasks(message.structuredPlan, message.aiSource);
-                                }
-                              }}
-                              onSecondary={generateJourneyPlan}
-                            />
-                          ) : (
-                            <>
-                              <p className="text-sm leading-6 text-ink">{message.content}</p>
-                              {message.role === "pet" && message.type === "text" && message.canCreateCard && message.sourceDraft ? (
-                                <div className="mt-4 flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    className="story-button-secondary w-auto px-4 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                                    disabled={companionLoading}
-                                    onClick={() => generateTaskCardFromMessage(message.sourceDraft ?? "")}
-                                  >
-                                    生成任务卡
-                                  </button>
-                                </div>
-                              ) : null}
-                            </>
-                          )}
-                        </div>
-                      </article>
-                    ))
+                        </article>
+                      );
+                    })
                   ) : null}
                   {companionLoading && companionThinking && !hasActiveStreamingMessage ? (
                     <article className="flex flex-col gap-2 items-start">

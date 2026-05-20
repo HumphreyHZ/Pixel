@@ -361,6 +361,35 @@ function inferTaskTitlesFromDraft(draft: string): string[] {
   return ["先准备好第一步需要的东西", "把中间最关键的动作单独完成", "收尾整理好，再确认下一步"];
 }
 
+function isStepBreakdownDraft(draft: string): boolean {
+  const normalized = draft.trim();
+  return /((拆|分|列|整理).{0,10}([3三]\s*(步|个步骤|个动作|件事|条)|步骤|小步|待办)|拆吧|拆一下|分一下|列一下|拆开|拆顺)/u.test(normalized);
+}
+
+function shouldAnswerTextWithSteps(payload: CompanionAIRequest): boolean {
+  if (payload.streamMode !== "text" || payload.action !== "message") return false;
+  if (isStepBreakdownDraft(payload.draft)) return true;
+
+  return Boolean(
+    payload.context.agent.activeGoal
+    && /(拆吧|拆一下|分一下|列一下|继续拆|接着拆|然后呢|下一步)/u.test(payload.draft.trim()),
+  );
+}
+
+function buildTextStepFallback(payload: CompanionAIRequest): string {
+  const targetDraft = isStepBreakdownDraft(payload.draft)
+    ? payload.draft
+    : payload.context.agent.activeGoal ?? payload.draft;
+  const steps = inferTaskTitlesFromDraft(targetDraft);
+
+  return [
+    "可以，我直接拆成三步：",
+    `1. ${steps[0]}`,
+    `2. ${steps[1]}`,
+    `3. ${steps[2]}`,
+  ].join("\n");
+}
+
 function extractTaskTitlesFromToolCalls(toolCalls?: AgentToolCall[]): string[] {
   const createTasksCall = toolCalls?.find((toolCall) => toolCall.name === "createTasks");
   return normalizeStringList(createTasksCall?.args?.titles);
@@ -417,8 +446,15 @@ function buildServerFallbackResponse(payload: CompanionAIRequest, reason: string
   });
 
   if (payload.streamMode === "text") {
+    if (shouldAnswerTextWithSteps(payload)) {
+      return {
+        content: buildTextStepFallback(payload),
+        source: "fallback",
+      };
+    }
+
     return {
-      content: "真实整理刚刚有点打结，我先用文字把你接住。你可以继续说，或者点生成任务卡再拆成可执行步骤。",
+      content: "真实整理刚刚有点打结，我先用文字把你接住。你可以继续说，我会接着帮你理顺。",
       source: "fallback",
     };
   }
@@ -760,12 +796,18 @@ function buildSystemPrompt(payload: CompanionAIRequest): string {
   const intent = detectDraftIntent(draft);
 
   if (streamMode === "text") {
+    const shouldAnswerWithSteps = shouldAnswerTextWithSteps(payload);
+
     return [
       "你是像素宠物专注 app 的陪伴整理助手，语气治愈、聪明、有陪伴感。",
       `当前陪伴：${context.activePet.name}。只有用户说 app 内陪伴、探索、喂食、图鉴或互动时才使用这个名字；现实猫狗不要替换成陪伴名。`,
       "本次只做快速文字回复，不生成卡片，不返回 structuredPlan、focusBrief、tasks 或 toolCalls。",
-      "即使用户说“拆成 3 步”或“安排顺序”，也先自然接住这句话，告诉他可以继续生成任务卡。",
-      "回复 1 到 2 句中文，短一点，有下一步感。",
+      shouldAnswerWithSteps
+        ? "用户明确要求拆成步骤。content 必须直接包含 1. 2. 3. 三条具体步骤，不能只说“我会帮你整理”，也不能要求用户再输入一次。"
+        : "普通聊天回复 1 到 2 句中文，短一点，有下一步感；如果用户没说清要拆什么，可以轻轻追问一句。",
+      shouldAnswerWithSteps
+        ? "如果输入只是“拆吧/继续/然后呢”，就沿用当前目标来拆；每一步都要围绕现实任务，不要把现实猫狗替换成当前陪伴。"
+        : "现实猫狗就是现实宠物，不要把它们写成当前陪伴。",
       "禁止出现：面试官、评审、作品集展示、demo、录屏、测试、招聘、用户、任务助手。",
       `当前目标：${context.agent.activeGoal ?? "暂无固定目标"}。`,
       `json: {"content":"..."}`,
